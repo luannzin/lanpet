@@ -2,7 +2,7 @@
 """LanPet asset generator: procedural, shaded, auto-outlined pixel art.
 
 Writes assets/<species>.png (13 animation rows x 4 frames of 32x32),
-assets/hats.png, assets/items.png, assets/habitat.png and assets/meta.json.
+assets/hats.png, assets/items.png, assets/rooms.png, assets/icon.png, assets/tray*.png and assets/meta.json.
 
     python3 tools/gen_assets.py [preview.png]
 
@@ -927,6 +927,18 @@ SLOTS = {
     "shop": [[100, 74], [62, 75], [138, 75], [26, 77], [174, 77]],
 }
 
+# Clickable furniture: [x, y, w, h] in room pixels -> the action it starts (see Hot in art.rs).
+HOT = {
+    "home": [],
+    "bedroom": [{"rect": [103, 31, 90, 37], "act": "sleep"}],
+    "kitchen": [{"rect": [157, 13, 36, 54], "act": "feed"}],
+    "library": [{"rect": [72, 40, 56, 28], "act": "study"}, {"rect": [3, 8, 59, 60], "act": "study"}],
+    "gym": [{"rect": [10, 44, 46, 22], "act": "lift"}, {"rect": [139, 28, 54, 40], "act": "run"}],
+    "portal": [{"rect": [80, 9, 62, 59], "act": "explore"}],
+    "arena": [{"rect": [27, 57, 145, 23], "act": "challenge"}],
+    "shop": [{"rect": [22, 16, 156, 26], "act": "browse"}, {"rect": [36, 47, 128, 21], "act": "browse"}],
+}
+
 ROOMS = [("home", room_home), ("bedroom", room_bedroom), ("kitchen", room_kitchen), ("library", room_library),
          ("gym", room_gym), ("portal", room_portal), ("arena", room_arena), ("shop", room_shop)]
 
@@ -938,6 +950,23 @@ def sheet(frames, cols, fw, fh):
     for i, fr in enumerate(frames):
         img.paste(fr, ((i % cols) * fw, (i // cols) * fh))
     return img
+
+
+def tray_icons(pet):
+    """Tray icons at 2x: the dino trimmed to its pixels, plus a copy with a gold 'something happened' badge."""
+    body = pet.crop(pet.getbbox())
+    side = max(body.size) + 2
+    sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    sq.paste(body, ((side - body.width) // 2, side - body.height - 1))
+    plain = sq.resize((side * 2, side * 2), Image.NEAREST)
+    plain.save(os.path.join(ROOT, "tray.png"))
+    done = plain.copy()
+    s = side * 2
+    for x in range(s - 12, s):
+        for y in range(0, 12):
+            edge = x in (s - 12, s - 11, s - 2, s - 1) or y in (0, 1, 10, 11)
+            done.putpixel((x, y), INK if edge else rgb("#f6c343"))
+    done.save(os.path.join(ROOT, "tray_done.png"))
 
 
 def main():
@@ -969,10 +998,12 @@ def main():
     for i, (name, fn) in enumerate(ROOMS):
         img, info = fn()
         rooms.paste(img, (0, i * RH))
-        meta["rooms"].append({"name": name, **info, "slots": SLOTS[name]})
+        meta["rooms"].append({"name": name, **info, "slots": SLOTS[name], "hot": HOT[name]})
     rooms.save(os.path.join(ROOT, "rooms.png"))
     # app icon (AppImage / macOS .app): happy dino, 16x so platform downscaling stays crisp
-    sheets["dino"].crop((0, 5 * F, F, 6 * F)).resize((512, 512), Image.NEAREST).save(os.path.join(ROOT, "icon.png"))
+    happy = sheets["dino"].crop((0, 5 * F, F, 6 * F))
+    happy.resize((512, 512), Image.NEAREST).save(os.path.join(ROOT, "icon.png"))
+    tray_icons(happy)
     with open(os.path.join(ROOT, "meta.json"), "w") as fh:
         json.dump(meta, fh, separators=(",", ":"))
 

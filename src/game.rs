@@ -414,12 +414,27 @@ pub fn battle(a: &Fighter, b: &Fighter, seed: u64) -> Battle {
 
 // ------------------------------------------------------------------------------------------ pet
 
+/// Jobs pay out every minute, so stopping early keeps what was earned. Expeditions pay at the end.
+pub const BEAT: u64 = 60;
+/// Enough energy to start a job; it ends on its own when energy runs out.
+const MIN_ENERGY: f32 = 5.0;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub job: Job,
     pub start: u64,
     pub end: u64,
     pub seed: u64,
+}
+
+impl Task {
+    /// When this task next pays out.
+    fn next_beat(&self, after: u64) -> u64 {
+        match self.job {
+            Job::Explore(_) => self.end,
+            _ => (self.start + (after.saturating_sub(self.start) / BEAT + 1) * BEAT).min(self.end),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -436,7 +451,11 @@ pub struct Report {
 
 pub enum Event {
     LevelUp(u32),
+    /// A minute of work paid out (`BEAT` seconds of `Pet::job_gain`).
+    Paid(Job),
     Done(Job),
+    /// Ended early after `secs` of work: by you (`why` None) or because the pet ran out of steam.
+    Stopped { job: Job, secs: u64, why: Option<&'static str> },
     Back(Report),
 }
 
@@ -528,6 +547,19 @@ impl Pet {
         0.5 + self.mood / 100.0
     }
 
+    /// What a whole job gives: (XP, gain, what the gain is). XP grows with level and mood;
+    /// it's earned bit by bit, so half a job gives half of this.
+    pub fn job_gain(&self, job: Job) -> (f32, f32, &'static str) {
+        let xp = (25.0 + 5.0 * self.level as f32) * self.xp_mult();
+        match job {
+            Job::Study => (xp, 3.0, "Mana"),
+            Job::Lift => (xp, 3.0, "Str"),
+            Job::Run => (xp, 8.0, "HP"),
+            Job::Sleep => (0.0, 100.0, "Energy"),
+            Job::Explore(_) => (0.0, 0.0, ""),
+        }
+    }
+
     fn gain_xp(&mut self, xp: f32, ev: &mut Vec<Event>) {
         self.xp += xp;
         while self.xp >= xp_needed(self.level) {
@@ -552,13 +584,31 @@ impl Pet {
     /// Advance the simulation to `now`, catching up any time spent offline.
     pub fn tick(&mut self, now: u64, ev: &mut Vec<Event>) {
         while self.last < now {
-            let end = self.task.map_or(now, |t| t.end.min(now)).max(self.last);
+            let next = self.task.map_or(now, |t| t.next_beat(self.last));
+            let end = next.min(now).max(self.last);
             self.integrate((end - self.last) as f32, ev);
             self.last = end;
-            if let Some(t) = self.task.filter(|t| end >= t.end) {
+            let Some(t) = self.task else { continue };
+            if end >= t.end {
                 self.task = None;
                 self.finish(t, ev);
+            } else if let Some(why) = self.out_of_steam(t.job) {
+                self.task = None;
+                ev.push(Event::Stopped { job: t.job, secs: end - t.start, why: Some(why) });
+            } else if end == next && !matches!(t.job, Job::Explore(_)) {
+                ev.push(Event::Paid(t.job));
             }
+        }
+    }
+
+    /// Why a job can't go on (expeditions always finish).
+    fn out_of_steam(&self, job: Job) -> Option<&'static str> {
+        match job {
+            Job::Explore(_) => None,
+            _ if self.hunger <= 5.0 => Some("Too hungry to keep going!"),
+            Job::Sleep => None,
+            _ if self.energy <= 0.0 => Some("Too tired to keep going!"),
+            _ => None,
         }
     }
 
@@ -585,27 +635,23 @@ impl Pet {
                 let frac = dt / t.job.secs() as f32;
                 self.energy -= t.job.energy_cost() * frac;
                 self.hunger -= t.job.hunger_cost() * frac;
-                let xp = (25.0 + 5.0 * self.level as f32) * self.xp_mult() * frac;
+                let (xp, gain, _) = self.job_gain(t.job);
                 match t.job {
-                    Job::Study => {
-                        self.mana += 3.0 * frac;
-                        self.gain_xp(xp, ev);
-                    }
-                    Job::Lift => {
-                        self.str += 3.0 * frac;
-                        self.gain_xp(xp, ev);
-                    }
+                    Job::Study => self.mana += gain * frac,
+                    Job::Lift => self.str += gain * frac,
                     Job::Run => {
-                        self.max_hp += 8.0 * frac;
-                        self.hp += 8.0 * frac;
+                        self.max_hp += gain * frac;
+                        self.hp += gain * frac;
                         self.spd += 0.3 * frac;
-                        self.gain_xp(xp, ev);
                     }
                     Job::Sleep => {
-                        self.energy += 100.0 * frac;
+                        self.energy += gain * frac;
                         self.hp += 0.4 * max * frac;
                     }
                     Job::Explore(_) => {}
+                }
+                if xp > 0.0 {
+                    self.gain_xp(xp * frac, ev);
                 }
             }
         }
@@ -635,7 +681,9 @@ impl Pet {
             }
         }
         if job != Job::Sleep {
-            if self.energy < job.energy_cost() {
+            // an expedition can't be cut short, so it needs all its energy up front
+            let need = if matches!(job, Job::Explore(_)) { job.energy_cost() } else { MIN_ENERGY };
+            if self.energy < need {
                 return Err("Too sleepy... zzz");
             }
             if self.hunger < 10.0 {
@@ -646,10 +694,12 @@ impl Pet {
         Ok(())
     }
 
-    /// Stop early (not for expeditions). Gains so far are already applied.
-    pub fn stop(&mut self) {
-        if !matches!(self.task, Some(Task { job: Job::Explore(_), .. })) {
+    /// Stop early (not for expeditions). Everything earned up to `now` stays.
+    pub fn stop(&mut self, now: u64, ev: &mut Vec<Event>) {
+        self.tick(now, ev);
+        if let Some(t) = self.task.filter(|t| !matches!(t.job, Job::Explore(_))) {
             self.task = None;
+            ev.push(Event::Stopped { job: t.job, secs: now.saturating_sub(t.start), why: None });
         }
     }
 
@@ -834,7 +884,6 @@ pub fn random_name(rng: &mut Rng) -> String {
 pub struct Save {
     pub id: u64,
     pub pet: Option<Pet>,
-    pub pos: Option<[f32; 2]>,
 }
 
 impl Save {
@@ -856,7 +905,7 @@ impl Save {
     }
 
     pub fn load(path: &Path) -> Save {
-        let fresh = || Save { id: Rng::seeded().next(), pet: None, pos: None };
+        let fresh = || Save { id: Rng::seeded().next(), pet: None };
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 // Never silently overwrite a save we can't read.
@@ -908,6 +957,32 @@ mod tests {
     }
 
     #[test]
+    fn jobs_pay_as_they_go() {
+        let mut p = Pet::new("A".into(), Species::Frog, 0);
+        let mana = p.mana;
+        p.start(Job::Study, 0, 1).unwrap();
+        let mut ev = Vec::new();
+        p.tick(300, &mut ev); // half a study session
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Paid(Job::Study))).count(), 5);
+        assert!((p.mana - mana - 1.5).abs() < 0.01, "half the mana: {}", p.mana - mana);
+        p.stop(300, &mut ev);
+        assert!(p.task.is_none());
+        assert!(ev.iter().any(|e| matches!(e, Event::Stopped { job: Job::Study, secs: 300, why: None })));
+        assert!((p.mana - mana - 1.5).abs() < 0.01, "stopping keeps it");
+
+        // a little energy is enough to farm a little; the job ends itself when it runs out
+        let (str0, mut ev) = (p.str, Vec::new());
+        p.energy = 6.0;
+        p.start(Job::Lift, 300, 2).unwrap();
+        p.tick(900, &mut ev);
+        let Some(Event::Stopped { secs, why: Some(_), .. }) = ev.iter().find(|e| matches!(e, Event::Stopped { .. })) else { panic!("no auto-stop") };
+        assert!((170..=240).contains(secs), "6 energy lifts for ~3 min, got {secs}s");
+        assert!(p.str > str0 && p.str < str0 + 1.5);
+        // expeditions still want all their energy up front
+        assert!(p.start(Job::Explore(0), 900, 3).is_err());
+    }
+
+    #[test]
     fn fresh_pet_usually_clears_the_meadow() {
         let rates: Vec<(Species, u32)> = Species::ALL
             .iter()
@@ -931,8 +1006,11 @@ mod tests {
 
     #[test]
     fn save_round_trips() {
-        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), pos: Some([1.0, 2.0]) };
+        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)) };
         let back: Save = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(back.pet.unwrap().bag.get(&Item::Apple), Some(&3));
+        // saves from before the tray still load (they carried a window position)
+        let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0]}"#).unwrap();
+        assert_eq!(old.id, 7);
     }
 }

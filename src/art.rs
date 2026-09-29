@@ -52,10 +52,17 @@ struct StateMeta {
 }
 
 #[derive(Deserialize)]
+struct HotMeta {
+    rect: [f32; 4],
+    act: String,
+}
+
+#[derive(Deserialize)]
 struct RoomMeta {
     spot: [f32; 2],
     spot2: Option<[f32; 2]>,
     slots: Vec<[f32; 2]>,
+    hot: Vec<HotMeta>,
 }
 
 #[derive(Deserialize)]
@@ -213,6 +220,11 @@ impl Art {
     /// Shared-room slot positions (room pixels).
     pub fn slots(&self, room: Room) -> impl Iterator<Item = Pos2> + '_ {
         self.meta.rooms[room as usize].slots.iter().map(|s| pos2(s[0], s[1]))
+    }
+
+    /// Clickable furniture (room pixels) and the action name it starts.
+    pub fn hot(&self, room: Room) -> impl Iterator<Item = (Rect, &str)> + '_ {
+        self.meta.rooms[room as usize].hot.iter().map(|h| (Rect::from_min_size(pos2(h.rect[0], h.rect[1]), vec2(h.rect[2], h.rect[3])), h.act.as_str()))
     }
 }
 
