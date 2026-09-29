@@ -11,11 +11,19 @@ Grab the file for your OS from [Releases](https://github.com/luannzin/lanpet/rel
 | OS | File | Run |
 |----|------|-----|
 | Linux (Ubuntu 22.04+) | `LanPet-x86_64.AppImage` | `chmod +x LanPet-x86_64.AppImage && ./LanPet-x86_64.AppImage` |
-| macOS 11+ | `LanPet-macos.zip` | Unzip, then **right-click LanPet.app → Open** the first time (the app isn't notarized) |
-| Windows 10+ | `lanpet-windows-x86_64.zip` | Unzip, run `lanpet.exe` (SmartScreen: *More info → Run anyway*) |
+| macOS 11+ | `LanPet-macos.zip` | Unzip and open LanPet.app. First time only: macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway** |
+| Windows 10+ | `lanpet-windows-x86_64.zip` | Unzip, run `lanpet.exe`. First time only: **More info → Run anyway** |
 
-LAN play needs everyone on the same network with UDP port **47474** allowed. Say yes when the
-Windows firewall or macOS "local network" prompt appears.
+Those one-time warnings appear because the app isn't signed with a paid Apple/Microsoft certificate.
+
+macOS without the warning (downloads from the terminal skip Gatekeeper's quarantine):
+
+```bash
+curl -L https://github.com/luannzin/lanpet/releases/latest/download/LanPet-macos.zip -o /tmp/LanPet.zip && ditto -x -k /tmp/LanPet.zip /Applications && open /Applications/LanPet.app
+```
+
+LAN play: be on the same Wi-Fi/network and click **Allow** on the first-run network prompt
+(Windows firewall, macOS "find devices on local network"). Nothing else to configure.
 
 ## Playing
 

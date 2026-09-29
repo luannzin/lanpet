@@ -43,8 +43,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ad-hoc signature: required for Apple Silicon. Not notarized, so a downloaded copy needs
-# right-click > Open the first time (or: xattr -dr com.apple.quarantine LanPet.app).
+# Ad-hoc signature: required for Apple Silicon. Not notarized, so a browser-downloaded copy needs
+# System Settings > Privacy & Security > Open Anyway once (or: xattr -dr com.apple.quarantine LanPet.app).
 codesign --force --deep --sign - "$app"
 ditto -c -k --keepParent "$app" dist/LanPet-macos.zip
 echo "Built $app and dist/LanPet-macos.zip"
