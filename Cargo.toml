@@ -1,0 +1,20 @@
+[package]
+name = "lanpet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# No "wayland" feature on purpose: on Linux we run through X11/XWayland, which is what
+# lets a small always-on-top window position itself above the taskbar.
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "x11"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+socket2 = "0.6.5"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
