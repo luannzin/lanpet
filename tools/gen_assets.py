@@ -971,6 +971,8 @@ def main():
         rooms.paste(img, (0, i * RH))
         meta["rooms"].append({"name": name, **info, "slots": SLOTS[name]})
     rooms.save(os.path.join(ROOT, "rooms.png"))
+    # app icon (AppImage / macOS .app): happy dino, 16x so platform downscaling stays crisp
+    sheets["dino"].crop((0, 5 * F, F, 6 * F)).resize((512, 512), Image.NEAREST).save(os.path.join(ROOT, "icon.png"))
     with open(os.path.join(ROOT, "meta.json"), "w") as fh:
         json.dump(meta, fh, separators=(",", ":"))
 

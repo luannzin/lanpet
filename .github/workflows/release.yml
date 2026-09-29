@@ -1,0 +1,71 @@
+name: release
+
+# Push a tag like v0.1.0 to build Linux, Windows and macOS binaries and publish a GitHub Release.
+# "Run workflow" on the Actions tab builds the same artifacts without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04 = oldest glibc we support, so the Linux build runs on 22.04 and newer.
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Linux (tests, AppImage, tarball)
+        if: runner.os == 'Linux'
+        run: |
+          # skip the real-broadcast test: CI runners have no LAN
+          cargo test --release -- --skip two_pets_find_each_other
+          curl -fsSL -o tools/appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x tools/appimagetool-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 tools/build-appimage.sh
+          tar -czf dist/lanpet-linux-x86_64.tar.gz -C target/release lanpet
+
+      - name: Windows (exe)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release
+          mkdir -p dist
+          7z a dist/lanpet-windows-x86_64.zip ./target/release/lanpet.exe
+
+      - name: macOS (universal .app)
+        if: runner.os == 'macOS'
+        run: tools/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanpet-${{ runner.os }}
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "LanPet $GITHUB_REF_NAME" --generate-notes

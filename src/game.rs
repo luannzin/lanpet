@@ -845,6 +845,8 @@ impl Save {
         }
         let base = if cfg!(windows) {
             std::env::var_os("APPDATA").map(PathBuf::from)
+        } else if cfg!(target_os = "macos") {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
         } else {
             std::env::var_os("XDG_DATA_HOME")
                 .map(PathBuf::from)

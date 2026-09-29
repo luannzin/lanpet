@@ -96,6 +96,8 @@ impl Net {
         // Discovery socket shares the well-known port (SO_REUSEADDR lets several pets run on one PC).
         let disc = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         disc.set_reuse_address(true)?;
+        #[cfg(target_os = "macos")] // BSD sockets also need SO_REUSEPORT to share a UDP port
+        disc.set_reuse_port(true)?;
         disc.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)).into())?;
         let disc: UdpSocket = disc.into();
         // Our own socket: broadcasts go out from here, so peers reply straight to it.

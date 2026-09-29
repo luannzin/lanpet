@@ -5,6 +5,17 @@ mod art;
 mod game;
 mod net;
 
+// Portable Linux binary: newer glibc re-versioned a few libm functions egui uses, which would make
+// the build require the builder's glibc. Bind them to their original versions instead. Release is
+// fat-LTO with one codegen unit, so this directive covers every call site; result runs on glibc 2.34+.
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+std::arch::global_asm!(
+    ".symver atan2f, atan2f@GLIBC_2.2.5",
+    ".symver acosf, acosf@GLIBC_2.2.5",
+    ".symver hypotf, hypotf@GLIBC_2.2.5",
+    ".symver hypot, hypot@GLIBC_2.2.5",
+);
+
 use art::{Anim, Art, PetDraw, Room, assign_slots};
 use eframe::egui::{
     self, Align, Align2, Button, Color32, CornerRadius, FontId, Frame, Key, Layout, Painter, PointerButton, Pos2,
@@ -48,6 +59,7 @@ fn main() -> eframe::Result {
         .with_inner_size(size)
         .with_decorations(false)
         .with_transparent(true)
+        .with_has_shadow(false) // macOS would shadow the transparent area
         .with_resizable(false)
         .with_always_on_top()
         .with_taskbar(false);
@@ -611,7 +623,8 @@ impl App {
             self.placed = true;
         } else if let Some(m) = monitor {
             let size = if self.panel { PANEL } else { COMPACT };
-            let pos = (m - size - vec2(24.0, 64.0)).max(Vec2::ZERO).to_pos2();
+            let dock = if cfg!(target_os = "macos") { 110.0 } else { 64.0 }; // clear the taskbar / Dock
+            let pos = (m - size - vec2(24.0, dock)).max(Vec2::ZERO).to_pos2();
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
             self.win_br = Some(pos + size);
             self.placed = true;
