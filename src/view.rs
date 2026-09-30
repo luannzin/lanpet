@@ -1,9 +1,9 @@
 //! Drawing: the room with everyone in it, the popover (ribbon, room, vitals, buttons), the expanded
-//! view (room cards, side panel) and the first-run hatch screen.
+//! view (room cards, side panel), the desktop pet and the hatch screen.
 
-use crate::actions::Btn;
+use crate::actions::{Btn, life_line};
 use crate::art::{Anim, Art, PetDraw, Room};
-use crate::game::{HitKind, Item, Slot, Species, ZONES, now, xp_needed};
+use crate::game::{DAY, HitKind, Item, Job, Slot, Species, Stage, ZONES, now, xp_needed};
 use crate::look::*;
 use crate::{Act, App, Fx, PX, Peer, Tab, View, game, job_anim, job_room};
 use eframe::egui::{
@@ -43,11 +43,13 @@ impl App {
         self.me_head = None;
         for b in &bodies {
             let feet = to(b.feet);
-            let shadow = Rect::from_center_size(feet + vec2(0.0, -1.0), vec2(20.0 * PX * b.squash.x, 4.0 * PX));
-            painter.rect_filled(shadow, 8.0, Color32::from_black_alpha(70));
+            if b.anim != Anim::Ghost {
+                let shadow = Rect::from_center_size(feet + vec2(0.0, -1.0), vec2(20.0 * PX * b.squash.x * b.stage.size(), 4.0 * PX));
+                painter.rect_filled(shadow, 8.0, Color32::from_black_alpha(70));
+            }
             let head = self.art.draw_pet(
                 &painter,
-                &PetDraw { species: b.species, hat: b.hat, anim: b.anim, frame: b.frame, feet, scale: PX, squash: b.squash, flip: b.flip, flash: b.flash },
+                &PetDraw { species: b.species, stage: b.stage, hat: b.hat, anim: b.anim, frame: b.frame, feet, scale: PX, squash: b.squash, flip: b.flip, flash: b.flash },
             );
             if let Some(name) = &b.name {
                 let sel = self.selected == Some(b.id);
@@ -212,7 +214,7 @@ impl App {
             self.fight_overlay(ui.painter(), scene);
         }
         self.paint_fx(&ui.painter_at(scene));
-        self.vitals(ui.painter(), Rect::from_min_size(at + vec2(0.0, 256.0), vec2(COL, 16.0)), t);
+        self.vitals(ui, Rect::from_min_size(at + vec2(0.0, 256.0), vec2(COL, 16.0)), t);
         self.action_row(ui, Rect::from_min_size(at + vec2(0.0, 278.0), vec2(COL, 52.0)), t, acts);
     }
 
@@ -244,8 +246,13 @@ impl App {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
         }
         resp.context_menu(|ui| {
-            if self.tray.is_some() && self.save.pet.is_some() && ui.button("Hide to tray").clicked() {
-                acts.push(Act::View(View::Tray));
+            if let Some(pet) = &self.save.pet {
+                if ui.button(format!("Let {} out on the desktop", pet.name)).clicked() {
+                    acts.push(Act::Out(true));
+                }
+                if self.tray.is_some() && ui.button("Hide to tray").clicked() {
+                    acts.push(Act::Out(false));
+                }
             }
             if ui.button("Quit LanPet").clicked() {
                 acts.push(Act::Quit);
@@ -254,7 +261,7 @@ impl App {
         plate(ui.painter(), title, PARCH, PARCH_LO);
     }
 
-    /// Gold, level and XP on the left; expand/shrink and hide on the right.
+    /// Gold, level, XP and life stage on the left; expand/shrink and the two ways to close on the right.
     fn coin_row(&self, ui: &mut Ui, r: Rect, acts: &mut Vec<Act>) {
         let Some(pet) = &self.save.pet else { return };
         let p = ui.painter();
@@ -262,43 +269,59 @@ impl App {
         let g = text1(p, pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, &pet.gold.to_string(), FontId::new(15.0, heavy()), PARCH, 80.0);
         let lv = text1(p, pos2(g.max.x + 16.0, r.center().y), Align2::LEFT_CENTER, &format!("Lv {}", pet.level), FontId::new(14.0, heavy()), PARCH, 60.0);
         let need = xp_needed(pet.level);
-        let bar = Rect::from_min_size(pos2(lv.max.x + 8.0, r.center().y - 5.0), vec2(80.0, 10.0));
+        let bar = Rect::from_min_size(pos2(lv.max.x + 8.0, r.center().y - 5.0), vec2(64.0, 10.0));
         p.rect_filled(bar, 0.0, WOOD_LO);
         let inner = bar.shrink(2.0);
-        p.rect_filled(Rect::from_min_size(inner.min, vec2(inner.width() * (self.disp[4] / need).clamp(0.0, 1.0), inner.height())), 0.0, BLUE);
+        p.rect_filled(Rect::from_min_size(inner.min, vec2(inner.width() * (self.disp[5] / need).clamp(0.0, 1.0), inner.height())), 0.0, BLUE);
+        let life = format!("{} · day {}", pet.stage().name(), pet.age / DAY + 1);
+        let life = text1(p, pos2(bar.max.x + 12.0, r.center().y), Align2::LEFT_CENTER, &life, FontId::new(12.0, heavy()), PARCH, r.max.x - 110.0 - bar.max.x);
         ui.interact(bar.expand(4.0), ui.id().with("xp"), Sense::hover()).on_hover_text(format!("{:.0} / {need:.0} XP to Lv {}", pet.xp, pet.level + 1));
+        ui.interact(life.expand(4.0), ui.id().with("life"), Sense::hover()).on_hover_text(format!("{}. Well-kept pets grow up stronger.", life_line(pet)));
 
+        // right to left: hide to tray (when there is one), out on the desktop, expand/shrink
+        let mut x = r.max.x + 4.0;
+        let mut next = |ui: &mut Ui, id: &str| {
+            x -= 34.0;
+            button(ui, Rect::from_min_size(pos2(x, r.min.y), vec2(30.0, 24.0)), ui.id().with(id), Skin::Wood, true)
+        };
+        if self.tray.is_some() {
+            let (resp, c) = next(ui, "hide");
+            ui.painter().rect_filled(Rect::from_center_size(c.center() + vec2(0.0, 3.0), vec2(12.0, 3.0)), 0.0, PARCH);
+            if resp.on_hover_text("Hide to tray").clicked() {
+                acts.push(Act::Out(false));
+            }
+        }
+        let (resp, c) = next(ui, "out");
+        paw(ui.painter(), c.center(), PARCH);
+        if resp.on_hover_text(format!("Let {} out on the desktop", pet.name)).clicked() {
+            acts.push(Act::Out(true));
+        }
         let expanded = self.view == View::Expanded;
-        let b1 = Rect::from_min_size(pos2(r.max.x - 64.0, r.min.y), vec2(30.0, 24.0));
-        let (resp, c) = button(ui, b1, ui.id().with("expand"), Skin::Wood, true);
+        let (resp, c) = next(ui, "expand");
         expand_icon(ui.painter(), c.center(), expanded);
         if resp.on_hover_text(if expanded { "Shrink" } else { "Expand" }).clicked() {
             acts.push(Act::View(if expanded { View::Popover } else { View::Expanded }));
         }
-        let b2 = Rect::from_min_size(pos2(r.max.x - 30.0, r.min.y), vec2(30.0, 24.0));
-        let (resp, c) = button(ui, b2, ui.id().with("hide"), Skin::Wood, true);
-        if self.tray.is_some() {
-            ui.painter().rect_filled(Rect::from_center_size(c.center() + vec2(0.0, 3.0), vec2(12.0, 3.0)), 0.0, PARCH);
-            if resp.on_hover_text("Hide to tray").clicked() {
-                acts.push(Act::View(View::Tray));
-            }
-        } else {
-            cross(ui.painter(), c.center(), PARCH);
-            if resp.on_hover_text("Quit LanPet").clicked() {
-                acts.push(Act::Quit);
-            }
-        }
     }
 
-    fn vitals(&self, p: &Painter, r: Rect, t: f64) {
+    /// Five bars, each with its pixel icon: HP, energy, food, water, mood. A low one pulses.
+    fn vitals(&self, ui: &mut Ui, r: Rect, t: f64) {
         let Some(pet) = &self.save.pet else { return };
         let max = pet.total_max_hp();
-        let rows = [("HP", self.disp[0], pet.hp, max, RED), ("Energy", self.disp[1], pet.energy, 100.0, GOLD), ("Food", self.disp[2], pet.hunger, 100.0, GREEN), ("Mood", self.disp[3], pet.mood, 100.0, PINK)];
-        let w = (r.width() - 3.0 * 10.0) / 4.0;
+        let rows = [
+            ("HP", self.disp[0], pet.hp, max, RED),
+            ("Energy", self.disp[1], pet.energy, 100.0, GOLD),
+            ("Food", self.disp[2], pet.hunger, 100.0, GREEN),
+            ("Water", self.disp[3], pet.thirst, 100.0, AQUA),
+            ("Mood", self.disp[4], pet.mood, 100.0, PINK),
+        ];
+        let w = (r.width() - 4.0 * 8.0) / 5.0;
         for (i, (label, shown, real, max, c)) in rows.into_iter().enumerate() {
-            let cell = Rect::from_min_size(pos2(r.min.x + i as f32 * (w + 10.0), r.min.y), vec2(w, r.height()));
-            let lr = text1(p, cell.left_center(), Align2::LEFT_CENTER, label, FontId::new(12.0, heavy()), PARCH, 50.0);
-            let bar = Rect::from_min_max(pos2(lr.max.x + 5.0, cell.min.y + 2.0), pos2(cell.max.x, cell.max.y - 2.0));
+            let cell = Rect::from_min_size(pos2(r.min.x + i as f32 * (w + 8.0), r.min.y), vec2(w, r.height()));
+            ui.interact(cell, ui.id().with(("vital", i)), Sense::hover()).on_hover_text(format!("{label} {real:.0} / {max:.0}"));
+            let p = ui.painter();
+            self.art.need(p, i, pos2(cell.min.x + 10.0, cell.center().y), PX);
+            let bar = Rect::from_min_max(pos2(cell.min.x + 23.0, cell.min.y + 2.0), pos2(cell.max.x, cell.max.y - 2.0));
             p.rect_filled(bar, 0.0, WOOD_LO);
             let inner = bar.shrink(2.0);
             let fw = |v: f32| inner.width() * (v / max).clamp(0.0, 1.0);
@@ -353,20 +376,20 @@ impl App {
             let tint = if cur || resp.hovered() { Color32::WHITE } else { Color32::from_gray(205) };
             self.art.room(p, room, thumb, Rect::from_min_size(pos2(sx, 30.0), thumb.size()), tint);
             // who's in there, drawn at 1x standing on the thumbnail's floor
-            let mut who: Vec<(Species, Option<Item>, Anim)> = Vec::new();
+            let mut who: Vec<(Species, Stage, Option<Item>, Anim)> = Vec::new();
             if here == Some(room)
                 && let Some(pet) = &self.save.pet
             {
-                who.push((pet.species, pet.hat, self.my_anim(t)));
+                who.push((pet.species, pet.stage(), pet.hat, self.my_anim(t)));
             }
             let peers: Vec<&Peer> = self.peers_in(room).collect();
-            who.extend(peers.iter().take(2).map(|p| (p.card.species, p.card.hat, p.card.job.map_or(Anim::Idle, job_anim))));
+            who.extend(peers.iter().take(2).map(|p| (p.card.species, p.card.stage, p.card.hat, p.card.job.map_or(Anim::Idle, job_anim))));
             let n = who.len() as f32;
             let tp = ui.painter_at(thumb);
-            for (k, (species, hat, anim)) in who.into_iter().enumerate() {
+            for (k, (species, stage, hat, anim)) in who.into_iter().enumerate() {
                 let x = thumb.center().x + (k as f32 - (n - 1.0) / 2.0) * 22.0;
                 let frame = self.art.frame(anim, t + k as f64 * 0.4);
-                self.art.draw_pet(&tp, &PetDraw { species, hat, anim, frame, feet: pos2(x, thumb.max.y - 1.0), scale: 1.0, squash: Vec2::splat(1.0), flip: k > 0, flash: 0.0 });
+                self.art.draw_pet(&tp, &PetDraw { species, stage, hat, anim, frame, feet: pos2(x, thumb.max.y - 1.0), scale: 1.0, squash: Vec2::splat(1.0), flip: k > 0, flash: 0.0 });
             }
             if !peers.is_empty() {
                 let chip = Rect::from_min_size(pos2(thumb.max.x - 17.0, thumb.min.y + 2.0), vec2(15.0, 15.0));
@@ -458,12 +481,13 @@ impl App {
         if let Some(peer) = self.selected.and_then(|id| self.peers.get(&id)) {
             let c = &peer.card;
             heading(ui, &c.name);
-            ui.label(RichText::new(format!("Lv {} {} · {} · {}W / {}L", c.level, c.species.name(), c.status, c.wins, c.losses)).color(INK_SOFT).size(12.5));
+            ui.label(RichText::new(format!("Lv {} {} {} · {} · {}W / {}L", c.level, c.stage.name().to_lowercase(), c.species.name(), c.status, c.wins, c.losses)).color(INK_SOFT).size(12.5));
         }
         if self.room == Room::Home && self.fight.is_none() && self.selected.is_none() {
             let f = pet.fighter(true);
-            heading(ui, &format!("{} · Lv {} {}", pet.name, pet.level, pet.species.name()));
+            heading(ui, &format!("{} · Lv {} {} {}", pet.name, pet.level, pet.stage().name().to_lowercase(), pet.species.name()));
             ui.label(RichText::new(format!("Str {} · Mana {} · Def {} · Spd {} · {}W / {}L", f.str, f.mag, f.def, f.spd, pet.wins, pet.losses)).color(INK_SOFT).size(12.5));
+            ui.label(RichText::new(life_line(pet)).color(INK_SOFT).size(12.5));
         }
         for b in self.actions(true, t) {
             row(ui, &self.art, &b, acts);
@@ -569,8 +593,12 @@ impl App {
         let at = win.min + vec2(PAD, PAD);
         let title = Rect::from_min_size(at, vec2(COL, 36.0));
         self.title_plate(ui, title, acts);
-        text1(ui.painter(), pos2(title.center().x, title.min.y + 12.0), Align2::CENTER_CENTER, "Pick your buddy", FontId::new(18.0, heavy()), INK, COL);
-        text1(ui.painter(), pos2(title.center().x, title.min.y + 25.5), Align2::CENTER_CENTER, "Lives in your tray, meets coworkers' pets on the LAN", FontId::proportional(12.0), INK_SOFT, COL);
+        let (head, sub) = match &self.save.late {
+            Some(old) => (format!("Goodbye, {}", old.name), format!("{} good days. The next egg inherits its gold and bag.", old.age / DAY)),
+            None => ("Pick your buddy".into(), "Lives in your tray, meets coworkers' pets on the LAN".into()),
+        };
+        text1(ui.painter(), pos2(title.center().x, title.min.y + 12.0), Align2::CENTER_CENTER, &head, FontId::new(18.0, heavy()), INK, COL - 16.0);
+        text1(ui.painter(), pos2(title.center().x, title.min.y + 25.5), Align2::CENTER_CENTER, &sub, FontId::proportional(12.0), INK_SOFT, COL - 16.0);
 
         let scene = room_frame(ui.painter(), at + vec2(0.0, 42.0));
         self.scene(ui, scene, Room::Home, t, acts);
@@ -585,7 +613,8 @@ impl App {
             let anim = if sel { Anim::Happy } else { Anim::Idle };
             let bob = if sel { -((t * 6.0).sin().abs() as f32) * 4.0 } else { 0.0 };
             let frame = self.art.frame(anim, t + i as f64 * 0.3);
-            self.art.draw_pet(ui.painter(), &PetDraw { species: *s, hat: None, anim, frame, feet: pos2(c.center().x, c.max.y - 22.0 + bob), scale: 2.0, squash: Vec2::splat(1.0), flip: false, flash: 0.0 });
+            let pet = PetDraw { species: *s, stage: Stage::Adult, hat: None, anim, frame, feet: pos2(c.center().x, c.max.y - 22.0 + bob), scale: 2.0, squash: Vec2::splat(1.0), flip: false, flash: 0.0 };
+            self.art.draw_pet(ui.painter(), &pet);
             text1(ui.painter(), pos2(c.center().x, c.max.y - 10.0), Align2::CENTER_CENTER, s.name(), FontId::new(13.0, heavy()), INK, cw);
             if resp.clicked() {
                 self.hatch_species = i;
@@ -612,9 +641,57 @@ impl App {
         }
     }
 
-    /// ← → change room, Esc steps back (expanded → popover → tray). Ignored while typing.
+    // -------------------------------------------------------------------------------------- desktop pet
+
+    /// Just the pet, on a see-through window that `roam_step` walks along the screen.
+    /// Click to open the popover beside it; drag to carry it somewhere else.
+    pub(crate) fn roam_view(&mut self, ui: &mut Ui, t: f64, acts: &mut Vec<Act>) {
+        const SCALE: f32 = 3.0;
+        let win = ui.max_rect();
+        self.scene_rect = win;
+        self.heads.clear();
+        self.me_head = None;
+        let painter = ui.painter_at(win);
+        let hit = Rect::from_min_max(pos2(win.center().x - 16.0 * SCALE, win.max.y - 34.0 * SCALE), pos2(win.center().x + 16.0 * SCALE, win.max.y));
+        let resp = ui.interact(hit, ui.id().with("roam"), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
+        if resp.drag_started_by(PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+            self.roam.held = true;
+            self.roam.still_at = t;
+        }
+        if resp.hovered() && !self.m.hovered {
+            self.m.sv -= 3.0;
+        }
+        self.m.hovered = resp.hovered();
+        if resp.clicked() {
+            acts.push(Act::View(View::Popover));
+        }
+        let feet = pos2(win.center().x, win.max.y - 6.0);
+        let away = self.save.pet.as_ref().and_then(|p| p.task).filter(|task| matches!(task.job, Job::Explore(_)));
+        if let Some(task) = away {
+            // out exploring: a note where the pet was, counting down to its return
+            let r = Rect::from_center_size(feet - vec2(0.0, 24.0), vec2(win.width() - 12.0, 40.0));
+            plate(&painter, r, PARCH, PARCH_LO);
+            let left = task.end.saturating_sub(now());
+            text1(&painter, r.center() - vec2(0.0, 9.0), Align2::CENTER_CENTER, "Out exploring", FontId::new(13.0, heavy()), INK, r.width() - 10.0);
+            text1(&painter, r.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, &format!("back in {}:{:02}", left / 60, left % 60), FontId::proportional(12.0), INK_SOFT, r.width() - 10.0);
+        } else if let Some(b) = self.me_body(feet + vec2(0.0, self.m.hop * SCALE), t) {
+            let shadow = Rect::from_center_size(feet + vec2(0.0, -1.0), vec2(20.0 * SCALE * b.squash.x * b.stage.size(), 4.0 * SCALE));
+            painter.rect_filled(shadow, 12.0, Color32::from_black_alpha(70));
+            let draw = PetDraw { species: b.species, stage: b.stage, hat: b.hat, anim: b.anim, frame: b.frame, feet: b.feet, scale: SCALE, squash: b.squash, flip: b.flip, flash: b.flash };
+            let head = self.art.draw_pet(&painter, &draw);
+            self.me_head = Some(head);
+            self.heads.push((b.id, head, feet, b.anim));
+            if let Some((text, until)) = self.said.get(&b.id) {
+                bubble(&painter, head, text, win, ((until - t) as f32).min(0.25) / 0.25);
+            }
+        }
+        self.paint_fx(&painter);
+    }
+
+    /// ← → change room, Esc steps back (expanded → popover → closed). Ignored while typing.
     pub(crate) fn keys(&self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        if self.save.pet.is_none() || ctx.egui_wants_keyboard_input() {
+        if self.save.pet.is_none() || !self.open() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let i = self.room as usize;

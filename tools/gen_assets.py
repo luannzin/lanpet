@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """LanPet asset generator: procedural, shaded, auto-outlined pixel art.
 
-Writes assets/<species>.png (13 animation rows x 4 frames of 32x32),
-assets/hats.png, assets/items.png, assets/rooms.png, assets/icon.png, assets/tray*.png and assets/meta.json.
+Writes assets/<species>.png (4 life stages x 15 animation rows x 4 frames of 32x32),
+assets/hats.png, assets/items.png, assets/needs.png, assets/rooms.png, assets/icon.png, assets/tray*.png
+and assets/meta.json.
 
     python3 tools/gen_assets.py [preview.png]
 
@@ -62,10 +63,22 @@ class Canvas:
         self.px = [[None] * w for _ in range(h)]
         self.part = [[-1] * w for _ in range(h)]
         self.edge = []
+        # (scale, ox, oy, drop): shapes shrink towards (ox, oy), then move down by `drop`.
+        # It's how the younger life stages get a smaller body under a still-big head.
+        self.xf = None
 
     def _part(self, edge):
         self.edge.append(edge)
         return len(self.edge) - 1
+
+    def pt(self, x, y):
+        if not self.xf or (self.xf[0] == 1 and self.xf[3] == 0):
+            return x, y
+        s, ox, oy, drop = self.xf
+        return ox + (x - ox) * s, oy + (y - oy) * s + drop
+
+    def _r(self, r):
+        return r * self.xf[0] if self.xf else r
 
     def put(self, x, y, c, p):
         x, y = math.floor(x), math.floor(y)
@@ -74,6 +87,7 @@ class Canvas:
             self.part[y][x] = p
 
     def ellipse(self, cx, cy, rx, ry, t, edge=True, clip=None):
+        (cx, cy), rx, ry = self.pt(cx, cy), self._r(rx), self._r(ry)
         p = self._part(edge)
         for y in range(int(cy - ry) - 1, int(cy + ry) + 2):
             for x in range(int(cx - rx) - 1, int(cx + rx) + 2):
@@ -83,6 +97,7 @@ class Canvas:
         return p
 
     def ring(self, cx, cy, rx, ry, w, t, edge=True, clip=None):
+        (cx, cy), rx, ry, w = self.pt(cx, cy), self._r(rx), self._r(ry), self._r(w)
         p = self._part(edge)
         for y in range(int(cy - ry) - 1, int(cy + ry) + 2):
             for x in range(int(cx - rx) - 1, int(cx + rx) + 2):
@@ -93,6 +108,7 @@ class Canvas:
         return p
 
     def poly(self, pts, t, edge=True):
+        pts = [self.pt(*q) for q in pts]
         p = self._part(edge)
         xs, ys = [q[0] for q in pts], [q[1] for q in pts]
         x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
@@ -106,10 +122,20 @@ class Canvas:
     def rect(self, x0, y0, x1, y1, t, edge=True):
         return self.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], t, edge)
 
-    def dots(self, pts, c):
+    def dots(self, pts, c, over=False):
+        """Single pixels. `over` keeps only the ones that land on something already drawn."""
         p = self._part(False)
         for x, y in pts:
-            self.put(x, y, c, p)
+            x, y = math.floor(x), math.floor(y)
+            if self.xf:
+                x, y = (math.floor(v) for v in self.pt(x + 0.5, y + 0.5))
+            if not over or (0 <= x < self.w and 0 <= y < self.h and self.px[y][x] is not None):
+                self.put(x, y, c, p)
+
+    def block(self, x0, y0, w, h):
+        """Where a w x h pixel block (an eye) lands under the transform, kept whole."""
+        cx, cy = self.pt(x0 + w / 2, y0 + h / 2)
+        return math.floor(cx - w / 2 + 0.5), math.floor(cy - h / 2 + 0.5)
 
     def art(self, x0, y0, rows, pal):
         p = self._part(False)
@@ -193,8 +219,30 @@ SPECIES = {
 STATES = [  # name, frames, fps
     ("idle", 4, 3), ("walk", 4, 8), ("run", 4, 12), ("sleep", 2, 1.5), ("eat", 2, 5),
     ("happy", 2, 6), ("train", 2, 3), ("study", 2, 1), ("attack", 2, 6), ("hurt", 1, 1),
-    ("sad", 2, 1.5), ("blink", 1, 1), ("egg", 4, 4),
+    ("sad", 2, 1.5), ("blink", 1, 1), ("egg", 4, 4), ("sick", 2, 1.5), ("ghost", 2, 2),
 ]
+
+# Life stages, in `Stage` order from game.rs: (head scale, head drop in px, body scale).
+# Babies are mostly head; elders keep the adult shape and go grey (see palette()).
+STAGES = ["baby", "teen", "adult", "elder"]
+SHAPE = {"baby": (0.84, 6, 0.68), "teen": (0.93, 3, 0.86), "adult": (1, 0, 1), "elder": (1, 0, 1)}
+GHOST = tones("#ffffff", "#e3ecff", "#b7c6f2")
+BROW = rgb("#f6f3fb")
+
+
+def palette(sp, stage, state):
+    P = SPECIES[sp]
+    if state == "ghost":
+        return dict(body=GHOST, belly=GHOST, acc=GHOST)
+
+    def fade(t, to, k):
+        return tuple(mix(c, rgb(to), k) for c in t)
+
+    if stage == "elder":
+        P = {k: fade(t, "#b8b3c2", 0.38) for k, t in P.items()}
+    if state == "sick":
+        P = dict(P, body=fade(P["body"], "#b9c9a0", 0.45))
+    return P
 
 
 def pose(state, f):
@@ -264,6 +312,18 @@ def pose(state, f):
         p["mouth"] = "frown"
         p["arms"] = "down2"
         p["fx"] = [None, "tear"][f]
+        p["cheek"] = 0
+    elif state == "sick":
+        p["hy"] = [1, 2][f]
+        p["bw"] = [0.3, 0.6][f]
+        p["eyes"] = ["sad", "closed"][f]
+        p["mouth"] = "sick"
+        p["arms"] = "down2"
+        p["fx"] = "sweat"
+        p["cheek"] = 0
+    elif state == "ghost":
+        p["hy"] = p["by"] = [2, 1][f]
+        p["eyes"] = "closed"
         p["cheek"] = 0
     return p
 
@@ -375,6 +435,10 @@ def mouth(c, style, y, sp):
         c.dots([(14, y + 1), (15, y), (16, y), (17, y + 1)], MOUTH)
     elif style == "wobble":
         c.dots([(13, y + 1), (14, y), (15, y + 1), (16, y), (17, y + 1), (18, y)], MOUTH)
+    elif style == "sick":  # a thermometer sticking out
+        c.dots([(13, y + 1), (14, y), (15, y + 1), (16, y)], MOUTH)
+        c.dots([(17, y), (18, y), (19, y + 1), (20, y + 1)], WHITE)
+        c.dots([(21, y + 2), (22, y + 2)], rgb("#ff4a5a"))
 
 
 def arms(c, style, body, by, front):
@@ -419,26 +483,35 @@ def prop(c, kind, hy):
 def fx(c, kind, hy):
     if kind == "sweat":
         c.ellipse(26, 7.5 + hy, 1.6, 2.2, SWEAT)
-        c.put(26, 5 + hy, SWEAT[1], c._part(True))
+        c.put(*c.pt(26.5, 5.5 + hy), SWEAT[1], c._part(True))
     elif kind == "tear":
         c.ellipse(10.5, 19.5 + hy, 1.2, 1.8, SWEAT)
 
 
-def pet_frame(sp, state, f):
-    P = SPECIES[sp]
-    c = Canvas()
+def pet_frame(sp, state, f, stage="adult"):
     if state == "egg":
         return egg_frame(sp, f), (16, 9)
+    ghost = state == "ghost"
+    P = palette(sp, stage, state)
+    hs, hd, bs = SHAPE["adult" if ghost else stage]
+    small = hs != 1  # shrunk heads keep blush and freckles on the head
+    c = Canvas()
     p = pose(state, f)
     hy, by = p["hy"], p["by"]
     body, belly = P["body"], P["belly"]
-    tail(c, sp, P, by)
-    fw = 3.6 if sp == "frog" else 3.0
-    c.ellipse(16 - 4.5 - (0.6 if sp == "frog" else 0), 28.6 - p["fl"], fw, 1.9, body)
-    c.ellipse(16 + 4.5 + (0.6 if sp == "frog" else 0), 28.6 - p["fr"], fw, 1.9, body)
+    HEAD, BODY = (hs, 16, 13 + hy, hd), (bs, 16, 30.5, 0)
+    c.xf = BODY
+    if ghost:  # no feet, no tail, a halo
+        c.ring(16, hy - 0.2, 6.5, 1.9, 1.1, tones("#fffbd0", "#ffe45c", "#f0b429"))
+    else:
+        tail(c, sp, P, by)
+        fw = 3.6 if sp == "frog" else 3.0
+        c.ellipse(16 - 4.5 - (0.6 if sp == "frog" else 0), 28.6 - p["fl"], fw, 1.9, body)
+        c.ellipse(16 + 4.5 + (0.6 if sp == "frog" else 0), 28.6 - p["fr"], fw, 1.9, body)
     c.ellipse(16, 23.5 + by + p["bh"] * 0.5, 6.6 + p["bw"], 5.4 + p["bh"], body)
     c.ellipse(16, 24.6 + by, 4.2 + p["bw"] * 0.6, 3.4, belly, edge=False)
     arms(c, p["arms"], body, by, front=False)
+    c.xf = HEAD
     behind_head(c, sp, P, hy)
     hrx, hry = (12.5, 8.3) if sp == "frog" else (11.6, 9.0)
     c.ellipse(16, 13 + hy + (0.7 if sp == "frog" else 0), hrx, hry, body)
@@ -453,9 +526,9 @@ def pet_frame(sp, state, f):
         for s in (-1, 1):
             c.poly([(16 + s * 9, 15 + hy), (16 + s * 13.4, 19 + hy), (16 + s * 8, 20 + hy)], body)
     if sp == "lizard":
-        c.dots([(7, 9 + hy), (8, 9 + hy), (24, 9 + hy), (23, 10 + hy), (22, 20 + by), (10, 21 + by)], P["acc"][1])
+        c.dots([(7, 9 + hy), (8, 9 + hy), (24, 9 + hy), (23, 10 + hy), (22, 20 + by), (10, 21 + by)], P["acc"][1], over=small)
     if sp == "frog":
-        c.dots([(8, 14 + hy), (9, 15 + hy), (23, 14 + hy), (22, 15 + hy), (15, 9 + hy), (17, 8 + hy)], P["acc"][1])
+        c.dots([(8, 14 + hy), (9, 15 + hy), (23, 14 + hy), (22, 15 + hy), (15, 9 + hy), (17, 8 + hy)], P["acc"][1], over=small)
     ey = 11 + hy
     if sp == "frog":
         ey = 4 + hy
@@ -464,13 +537,20 @@ def pet_frame(sp, state, f):
         ex = (8, 20)
     else:
         ex = (9, 19)
-    eye(c, ex[0], ey, p["eyes"], False)
-    eye(c, ex[1], ey, p["eyes"], True)
+    # eyes stay whole pixel blocks whatever the head's size
+    (lx, ey), (rx, _) = c.block(ex[0], ey, 4, 5), c.block(ex[1], ey, 4, 5)
+    c.xf = None
+    eye(c, lx, ey, p["eyes"], False)
+    eye(c, rx, ey, p["eyes"], True)
+    if stage == "elder" and not ghost:  # bushy white brows
+        c.dots([(x, ey - 2) for x in range(lx, lx + 4)] + [(lx - 1, ey - 1)], BROW, over=True)
+        c.dots([(x, ey - 2) for x in range(rx, rx + 4)] + [(rx + 4, ey - 1)], BROW, over=True)
+    c.xf = HEAD
     cheek = mix(P["body"][1], rgb("#ff5f9a"), 0.55)
     if p["cheek"]:
         cy = 16 + hy
         blush = [(6, cy), (7, cy), (8, cy)] if p["cheek"] == 1 else [(x, y) for x in (5, 6, 7, 8) for y in (cy, cy + 1)]
-        c.dots(blush + [(31 - x, y) for x, y in blush], cheek)
+        c.dots(blush + [(31 - x, y) for x, y in blush], cheek, over=small)
     my = 16 + hy
     if sp == "wolf":
         c.dots([(15, 15 + hy), (16, 15 + hy), (15, 16 + hy), (16, 16 + hy)], EYE)
@@ -481,15 +561,24 @@ def pet_frame(sp, state, f):
     if sp == "monkey":
         c.dots([(15, 16 + hy), (16, 16 + hy)], P["belly"][2])
         my = 17 + hy
+    if stage == "elder" and not ghost:  # and a little goatee
+        c.dots([(x, my + 3) for x in (14, 15, 16, 17)] + [(15, my + 4), (16, my + 4)], BROW, over=True)
     mouth(c, p["mouth"], my, sp)
-    arms(c, p["arms"], body, by, front=True) if not p["prop"] else None
+    # arms raised beside the head follow the head; the rest (and what they hold) follow the body
+    c.xf = BODY
     if p["prop"]:
         prop(c, p["prop"], hy)
-        arms(c, p["arms"], body, by, front=True)
+    c.xf = HEAD if p["arms"] in ("up", "up2") else BODY
+    arms(c, p["arms"], body, by, front=True)
+    c.xf = HEAD
     if p["fx"]:
         fx(c, p["fx"], hy)
-    head_top = (16, 2 + hy) if sp == "frog" else (16, int(round(13 + hy - hry)) + 1)
-    return c.image(), head_top
+    top = 2 + hy if sp == "frog" else int(round(13 + hy - hry)) + 1
+    head_top = (16, math.floor(c.pt(16, top)[1] + 0.5))
+    img = c.image()
+    if ghost:
+        img.putalpha(img.getchannel("A").point(lambda a: a * 205 // 255))
+    return img, head_top
 
 
 def egg_frame(sp, f):
@@ -561,7 +650,7 @@ def hat(name):
 # ----------------------------------------------------------------------------- items (16x16)
 ITEMS = ["Apple", "Burger", "Cake", "Sushi", "GoldenFish", "Coffee", "EnergyDrink", "Potion", "MegaPotion",
          "WoodSword", "IronSword", "DragonBlade", "MagicWand", "ArcaneOrb", "LeatherVest", "KnightArmor",
-         "LuckyClover", "SpeedBoots"]
+         "LuckyClover", "SpeedBoots", "Medicine"]
 
 
 def blade(c, t, hilt, guard, length=10):
@@ -654,6 +743,73 @@ def item(name):
         c.poly([(3, 2), (8, 2), (8, 10), (14, 11), (14.5, 14.5), (2.5, 14.5)], red)
         c.rect(2.5, 13, 14.5, 14.5, T("#ffffff", "#f0f0f6", "#c8c8d8"))
         c.poly([(8, 4), (14, 1.5), (13, 4.5), (15, 5), (9, 8)], T("#ffffff", "#e8f4ff", "#b8d0e8"))
+    elif name == "Medicine":
+        red = rgb("#f0434f")
+        c.rect(3.5, 5, 12.5, 15, T("#ffffff", "#f0f0f6", "#c8c8d8"))
+        c.rect(5.5, 1.5, 10.5, 5, T("#ff9d9d", "#f0434f", "#b52a3c"))
+        c.rect(7, 7, 9, 13, red, edge=False)
+        c.rect(5, 9, 11, 11, red, edge=False)
+    return c.image()
+
+
+# ----------------------------------------------------------------------------- need icons
+# 8x8 shapes on a 10x10 canvas (room for the outline), in the vitals row's order.
+NEEDS = [
+    ("hp", dict(R="#e0483e", r="#a92f33", w="#ffc2b8"), [
+        ".RR..RR.",
+        "RwRRRRRR",
+        "RwRRRRRR",
+        "RRRRRRRr",
+        ".RRRRRr.",
+        "..RRRr..",
+        "...Rr...",
+    ]),
+    ("energy", dict(Y="#f6c343", y="#c08a17", w="#fff1b0"), [
+        "....wY..",
+        "...wY...",
+        "..wYY...",
+        ".YYYYYY.",
+        "...YYy..",
+        "...Yy...",
+        "..Yy....",
+        "..y.....",
+    ]),
+    ("food", dict(A="#5dbb4f", a="#2f7a2b", w="#c8f0a8", b="#7d4a24"), [
+        "....b...",
+        "...b....",
+        ".AA.AAA.",
+        "AwAAAAAA",
+        "AwAAAAAa",
+        "AAAAAAAa",
+        ".AAAAAa.",
+        "..AA.a..",
+    ]),
+    ("water", dict(B="#5ac8f0", b="#2f8fc4", w="#dff6ff"), [
+        "...B....",
+        "...BB...",
+        "..BBB...",
+        "..BwBB..",
+        ".BwBBBB.",
+        ".BBBBBb.",
+        ".BBBBbb.",
+        "..BBbb..",
+    ]),
+    ("mood", dict(P="#ff8fc7", p="#d9609a", d="#3b2112"), [
+        "..PPPP..",
+        ".PPPPPP.",
+        "PPdPPdPP",
+        "PPdPPdPP",
+        "PPPPPPPP",
+        "PdPPPPdp",
+        ".PddddP.",
+        "..PPpp..",
+    ]),
+]
+
+
+def need_icon(rows, pal):
+    c = Canvas(10, 10)
+    c.art(1, 1, rows, {k: rgb(v) for k, v in pal.items()})
     return c.image()
 
 
@@ -779,6 +935,13 @@ def room_kitchen():
     c.rect(158, 34, 192, 35, rgb("#4a4e5c"), edge=False)
     c.rect(161, 22, 162, 30, rgb("#c8ccd6"), edge=False)
     c.rect(161, 38, 162, 50, rgb("#c8ccd6"), edge=False)
+    # water cooler
+    c.rect(128, 45, 142, 66, T("#e8ecf4", "#cdd3df", "#a9b0c0"))
+    c.rect(130, 32, 140, 45, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
+    c.ellipse(135, 32, 5, 2.6, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
+    c.rect(131, 52, 139, 57, rgb("#8a90a0"), edge=False)
+    c.dots([(132, 49), (133, 49)], rgb("#5ac8f0"))
+    c.dots([(137, 49), (138, 49)], rgb("#e0483e"))
     c.dots([(112, y) for y in range(0, 14)], rgb("#4a4658"))
     c.poly([(103, 20), (121, 20), (116, 13), (108, 13)], T("#ffe2b0", "#f0c888", "#c9a068"))
     img.alpha_composite(c.image())
@@ -931,7 +1094,7 @@ SLOTS = {
 HOT = {
     "home": [],
     "bedroom": [{"rect": [103, 31, 90, 37], "act": "sleep"}],
-    "kitchen": [{"rect": [157, 13, 36, 54], "act": "feed"}],
+    "kitchen": [{"rect": [157, 13, 36, 54], "act": "feed"}, {"rect": [126, 28, 18, 39], "act": "drink"}],
     "library": [{"rect": [72, 40, 56, 28], "act": "study"}, {"rect": [3, 8, 59, 60], "act": "study"}],
     "gym": [{"rect": [10, 44, 46, 22], "act": "lift"}, {"rect": [139, 28, 54, 40], "act": "run"}],
     "portal": [{"rect": [80, 9, 62, 59], "act": "explore"}],
@@ -953,45 +1116,51 @@ def sheet(frames, cols, fw, fh):
 
 
 def tray_icons(pet):
-    """Tray icons at 2x: the dino trimmed to its pixels, plus a copy with a gold 'something happened' badge."""
+    """Tray icons at 2x: the dino trimmed to its pixels, plus copies with a badge:
+    gold for 'something happened', red for 'your pet needs you'."""
     body = pet.crop(pet.getbbox())
     side = max(body.size) + 2
     sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     sq.paste(body, ((side - body.width) // 2, side - body.height - 1))
     plain = sq.resize((side * 2, side * 2), Image.NEAREST)
     plain.save(os.path.join(ROOT, "tray.png"))
-    done = plain.copy()
     s = side * 2
-    for x in range(s - 12, s):
-        for y in range(0, 12):
-            edge = x in (s - 12, s - 11, s - 2, s - 1) or y in (0, 1, 10, 11)
-            done.putpixel((x, y), INK if edge else rgb("#f6c343"))
-    done.save(os.path.join(ROOT, "tray_done.png"))
+    for name, color in (("tray_done", "#f6c343"), ("tray_need", "#e0483e")):
+        badged = plain.copy()
+        for x in range(s - 12, s):
+            for y in range(0, 12):
+                edge = x in (s - 12, s - 11, s - 2, s - 1) or y in (0, 1, 10, 11)
+                badged.putpixel((x, y), INK if edge else rgb(color))
+        badged.save(os.path.join(ROOT, f"{name}.png"))
 
 
 def main():
     os.makedirs(ROOT, exist_ok=True)
-    meta = {"frame": F, "states": [], "head": {}, "hats": HATS, "hat_size": [32, 28], "hat_anchor": [16, 14],
-            "items": ITEMS, "item_size": 16}
+    meta = {"frame": F, "states": [], "stages": [s.capitalize() for s in STAGES], "head": {}, "hats": HATS, "hat_size": [32, 28],
+            "hat_anchor": [16, 14], "items": ITEMS, "item_size": 16, "need_size": 10}
     for row, (name, n, fps) in enumerate(STATES):
         meta["states"].append({"name": name, "row": row, "frames": n, "fps": fps})
     sheets = {}
     for sp in SPECIES:
-        img = Image.new("RGBA", (4 * F, len(STATES) * F), (0, 0, 0, 0))
-        heads = {}
-        for row, (name, n, _) in enumerate(STATES):
-            heads[name] = []
-            for f in range(n):
-                fr, head = pet_frame(sp, name, f)
-                img.paste(fr, (f * F, row * F))
-                heads[name].append(head)
+        # one block of animation rows per life stage, stacked in STAGES order
+        img = Image.new("RGBA", (4 * F, len(STAGES) * len(STATES) * F), (0, 0, 0, 0))
+        heads = []
+        for si, stage in enumerate(STAGES):
+            heads.append([])
+            for row, (name, n, _) in enumerate(STATES):
+                frames = [pet_frame(sp, name, f, stage) for f in range(n)]
+                for f, (fr, _) in enumerate(frames):
+                    img.paste(fr, (f * F, (si * len(STATES) + row) * F))
+                heads[-1].append([head for _, head in frames])
         meta["head"][sp] = heads
         img.save(os.path.join(ROOT, f"{sp}.png"))
         sheets[sp] = img
+    adult = STAGES.index("adult") * len(STATES) * F  # y of the adult block in a sheet
     hats = sheet([hat(n) for n in HATS], len(HATS), 32, 28)
     hats.save(os.path.join(ROOT, "hats.png"))
     items = sheet([item(n) for n in ITEMS], 6, 16, 16)
     items.save(os.path.join(ROOT, "items.png"))
+    sheet([need_icon(rows, pal) for _, pal, rows in NEEDS], len(NEEDS), 10, 10).save(os.path.join(ROOT, "needs.png"))
     rooms = Image.new("RGBA", (RW, RH * len(ROOMS)))
     meta["room_size"] = [RW, RH]
     meta["rooms"] = []
@@ -1001,7 +1170,7 @@ def main():
         meta["rooms"].append({"name": name, **info, "slots": SLOTS[name], "hot": HOT[name]})
     rooms.save(os.path.join(ROOT, "rooms.png"))
     # app icon (AppImage / macOS .app): happy dino, 16x so platform downscaling stays crisp
-    happy = sheets["dino"].crop((0, 5 * F, F, 6 * F))
+    happy = sheets["dino"].crop((0, adult + 5 * F, F, adult + 6 * F))
     happy.resize((512, 512), Image.NEAREST).save(os.path.join(ROOT, "icon.png"))
     tray_icons(happy)
     with open(os.path.join(ROOT, "meta.json"), "w") as fh:
@@ -1009,8 +1178,8 @@ def main():
 
     if len(sys.argv) > 1:  # contact sheet: every room with a pet on its spot, 2x
         prev = Image.new("RGBA", (RW * 2 * 2 + 8, RH * 2 * 4 + 24), rgb("#111016"))
-        idle = sheets["dino"].crop((0, 0, F, F))
-        sleep = sheets["wolf"].crop((0, 3 * F, F, 4 * F))
+        idle = sheets["dino"].crop((0, adult, F, adult + F))
+        sleep = sheets["wolf"].crop((0, adult + 3 * F, F, adult + 4 * F))
         for i, (name, _) in enumerate(ROOMS):
             room = rooms.crop((0, i * RH, RW, (i + 1) * RH))
             info = meta["rooms"][i]
@@ -1018,7 +1187,7 @@ def main():
             room.alpha_composite(sleep if name == "bedroom" else idle, (x - 16, y - 31))
             if "spot2" in info:
                 x, y = info["spot2"]
-                room.alpha_composite(sheets["frog"].crop((0, 2 * F, F, 3 * F)), (x - 16, y - 31))
+                room.alpha_composite(sheets["frog"].crop((0, adult + 2 * F, F, adult + 3 * F)), (x - 16, y - 31))
             prev.alpha_composite(room.resize((RW * 2, RH * 2), Image.NEAREST), ((i % 2) * (RW * 2 + 8), (i // 2) * (RH * 2 + 8)))
         prev.save(sys.argv[1])
     print("assets ->", os.path.normpath(ROOT))

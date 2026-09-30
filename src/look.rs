@@ -20,6 +20,7 @@ pub const GOLD: Color32 = Color32::from_rgb(0xf6, 0xc3, 0x43);
 pub const GOLD_LO: Color32 = Color32::from_rgb(0xc0, 0x8a, 0x17);
 pub const RED: Color32 = Color32::from_rgb(0xe0, 0x48, 0x3e);
 pub const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xff);
+pub const AQUA: Color32 = Color32::from_rgb(0x5a, 0xc8, 0xf0);
 pub const BUBBLE: Color32 = Color32::from_rgb(0xff, 0xf8, 0xe6);
 pub const HOT: Color32 = Color32::from_rgb(0xff, 0xf3, 0xc4);
 // Effect colours, drawn over the dark rooms.
@@ -190,11 +191,11 @@ pub fn expand_icon(p: &Painter, c: Pos2, inward: bool) {
     }
 }
 
-pub fn cross(p: &Painter, c: Pos2, color: Color32) {
-    for k in -2..=2 {
-        let o = k as f32 * 2.0;
-        p.rect_filled(Rect::from_center_size(c + vec2(o, o), vec2(2.0, 2.0)), 0.0, color);
-        p.rect_filled(Rect::from_center_size(c + vec2(o, -o), vec2(2.0, 2.0)), 0.0, color);
+/// Paw print: a pad and three toes.
+pub fn paw(p: &Painter, c: Pos2, color: Color32) {
+    p.rect_filled(Rect::from_center_size(c + vec2(0.0, 3.0), vec2(10.0, 6.0)), 0.0, color);
+    for dx in [-6.0, 0.0, 6.0] {
+        p.rect_filled(Rect::from_center_size(c + vec2(dx, if dx == 0.0 { -5.0 } else { -3.0 }), vec2(4.0, 4.0)), 0.0, color);
     }
 }
 
@@ -217,7 +218,7 @@ pub fn die(p: &Painter, c: Pos2) {
 
 /// Speech bubble with a stepped pixel tail, kept inside `bounds`.
 pub fn bubble(p: &Painter, head: Pos2, text: &str, bounds: Rect, pop: f32) {
-    let g = p.layout(text.to_owned(), FontId::proportional(13.0), INK, 160.0);
+    let g = p.layout(text.to_owned(), FontId::proportional(13.0), INK, (bounds.width() - 26.0).min(160.0));
     let size = g.size() + vec2(14.0, 8.0);
     let lift = 12.0 + (1.0 - pop) * 6.0;
     let mut r = Rect::from_min_size(pos2(head.x - size.x / 2.0, head.y - size.y - lift), size);

@@ -2,7 +2,7 @@
 //! challenges, waves and gifts go straight back to the sender's address.
 //! Battles are simulated locally on both sides from the same seed + stat snapshots.
 
-use crate::game::{Fighter, Item, Job, Species, ZONES, clean};
+use crate::game::{Fighter, Item, Job, Species, Stage, ZONES, clean};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -17,6 +17,9 @@ pub struct Card {
     pub id: u64,
     pub name: String,
     pub species: Species,
+    /// Adult when an older LanPet (no life stages) says nothing.
+    #[serde(default)]
+    pub stage: Stage,
     pub level: u32,
     pub hat: Option<Item>,
     pub status: String,
@@ -147,6 +150,7 @@ mod tests {
             id,
             name: p.name.clone(),
             species: p.species,
+            stage: p.stage(),
             level: 1,
             hat: None,
             status: "x".into(),

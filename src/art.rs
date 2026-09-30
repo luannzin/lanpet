@@ -1,11 +1,12 @@
 //! Pixel art made by `tools/gen_assets.py`, embedded in the binary and drawn with nearest filtering.
 
-use crate::game::{Item, Species};
+use crate::game::{Item, Species, Stage};
 use eframe::egui::{Color32, ColorImage, Context, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2, pos2, vec2};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// Rows of every species sheet, in `STATES` order from the generator.
+/// Rows of every species sheet, in `STATES` order from the generator. A sheet stacks one such
+/// block of rows per life stage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Anim {
     Idle,
@@ -21,8 +22,10 @@ pub enum Anim {
     Sad,
     Blink,
     Egg,
+    Sick,
+    Ghost,
 }
-const ANIM_NAMES: [&str; 13] = ["idle", "walk", "run", "sleep", "eat", "happy", "train", "study", "attack", "hurt", "sad", "blink", "egg"];
+const ANIM_NAMES: [&str; 15] = ["idle", "walk", "run", "sleep", "eat", "happy", "train", "study", "attack", "hurt", "sad", "blink", "egg", "sick", "ghost"];
 
 /// Rooms, in `ROOMS` order from the generator.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,12 +72,15 @@ struct RoomMeta {
 struct Meta {
     frame: f32,
     states: Vec<StateMeta>,
-    head: HashMap<String, HashMap<String, Vec<[f32; 2]>>>,
+    stages: Vec<Stage>,
+    /// Top of the head per species: [stage][anim][frame].
+    head: HashMap<String, Vec<Vec<Vec<[f32; 2]>>>>,
     hats: Vec<Item>,
     hat_size: [f32; 2],
     hat_anchor: [f32; 2],
     items: Vec<Item>,
     item_size: f32,
+    need_size: f32,
     room_size: [f32; 2],
     rooms: Vec<RoomMeta>,
 }
@@ -84,11 +90,13 @@ pub struct Art {
     pets: Vec<(TextureHandle, TextureHandle)>, // (sprite, white silhouette) per species
     hats: TextureHandle,
     items: TextureHandle,
+    needs: TextureHandle,
     rooms: TextureHandle,
 }
 
 pub struct PetDraw {
     pub species: Species,
+    pub stage: Stage,
     pub hat: Option<Item>,
     pub anim: Anim,
     pub frame: usize,
@@ -122,6 +130,7 @@ impl Art {
     pub fn load(ctx: &Context) -> Art {
         let meta: Meta = serde_json::from_str(include_str!("../assets/meta.json")).expect("assets/meta.json matches art.rs");
         assert!(meta.states.iter().map(|s| s.name.as_str()).eq(ANIM_NAMES), "regenerate assets: animation rows changed");
+        assert!(meta.stages == Stage::ALL, "regenerate assets: life stages changed");
         let sheets: [&[u8]; 5] = [
             include_bytes!("../assets/dino.png"),
             include_bytes!("../assets/lizard.png"),
@@ -138,6 +147,7 @@ impl Art {
             pets,
             hats: texture(ctx, "hats", include_bytes!("../assets/hats.png"), false),
             items: texture(ctx, "items", include_bytes!("../assets/items.png"), false),
+            needs: texture(ctx, "needs", include_bytes!("../assets/needs.png"), false),
             rooms: texture(ctx, "rooms", include_bytes!("../assets/rooms.png"), false),
             meta,
         }
@@ -154,7 +164,8 @@ impl Art {
         let (sx, sy) = (d.scale * d.squash.x, d.scale * d.squash.y);
         let rect = Rect::from_min_size(pos2(d.feet.x - f * sx / 2.0, d.feet.y - f * sy), vec2(f * sx, f * sy));
         let (tex, white) = &self.pets[d.species as usize];
-        let src = Rect::from_min_size(pos2(d.frame as f32 * f, d.anim as usize as f32 * f), vec2(f, f));
+        let row = d.stage as usize * ANIM_NAMES.len() + d.anim as usize;
+        let src = Rect::from_min_size(pos2(d.frame as f32 * f, row as f32 * f), vec2(f, f));
         let mut suv = uv(tex, src);
         if d.flip {
             std::mem::swap(&mut suv.min.x, &mut suv.max.x);
@@ -163,10 +174,7 @@ impl Art {
         if d.flash > 0.0 {
             p.image(white.id(), rect, suv, Color32::WHITE.gamma_multiply(d.flash.min(1.0)));
         }
-        let head = self.meta.head[d.species.key()][ANIM_NAMES[d.anim as usize]]
-            .get(d.frame)
-            .copied()
-            .unwrap_or([16.0, 5.0]);
+        let head = self.meta.head[d.species.key()][d.stage as usize][d.anim as usize].get(d.frame).copied().unwrap_or([16.0, 5.0]);
         let hx = if d.flip { f - head[0] } else { head[0] };
         let head_pos = pos2(rect.min.x + hx * sx, rect.min.y + head[1] * sy);
         if let (Some(hat), true) = (d.hat, d.anim != Anim::Egg) {
@@ -198,6 +206,13 @@ impl Art {
             let r = Rect::from_center_size(rect.center(), vec2(rect.width(), rect.width() * (hh - 8.0) / hw));
             p.image(self.hats.id(), r, uv(&self.hats, src), Color32::WHITE);
         }
+    }
+
+    /// Icon for the `i`th vitals bar (HP, energy, food, water, mood), centred on `at` at `scale`.
+    pub fn need(&self, p: &Painter, i: usize, at: Pos2, scale: f32) {
+        let s = self.meta.need_size;
+        let src = Rect::from_min_size(pos2(i as f32 * s, 0.0), vec2(s, s));
+        p.image(self.needs.id(), Rect::from_center_size(at, Vec2::splat(s * scale)), uv(&self.needs, src), Color32::WHITE);
     }
 
     pub fn room_size(&self) -> Vec2 {

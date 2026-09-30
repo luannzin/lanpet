@@ -27,14 +27,14 @@ std::arch::global_asm!(
 
 use art::{Anim, Art, Room, assign_slots};
 use eframe::egui::{self, Color32, Pos2, Rect, Ui, Vec2, pos2, vec2};
-use game::{BEAT, Event, Fighter, Hit, HitKind, Item, Job, Report, Rng, Save, Slot, Species, ZONES, clean, now};
-use look::{BLUE, DIM, GOLD, LEAF, PINK, RED, VIOLET};
+use game::{BEAT, DAY, Event, Fighter, Hit, HitKind, Item, Job, Need, Report, Rng, Save, Slot, Species, Stage, ZONES, clean, now};
+use look::{AQUA, BLUE, DIM, GOLD, LEAF, PINK, RED, VIOLET};
 use net::{Card, Msg, Net};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tray::Tray;
+use tray::{Badge, Tray};
 
 /// Screen pixels per room/sprite pixel.
 const PX: f32 = 2.0;
@@ -90,6 +90,7 @@ struct ChatLine {
 struct Fight {
     f: [Fighter; 2],
     sp: [Species; 2],
+    st: [Stage; 2],
     hats: [Option<Item>; 2],
     /// Which fighter is us (challenger is always 0 so both sides simulate identically).
     me: usize,
@@ -160,9 +161,20 @@ struct Motion {
     hovered: bool,
 }
 
+/// The desktop pet: the window shrinks to just the pet and walks along the screen (points).
+struct Roam {
+    pos: Pos2,
+    target_x: f32,
+    wander_at: f64,
+    /// Picked up: the OS drags the window until it has sat still for a moment.
+    held: bool,
+    still_at: f64,
+}
+
 struct Body {
     id: u64,
     species: Species,
+    stage: Stage,
     hat: Option<Item>,
     anim: Anim,
     frame: usize,
@@ -178,6 +190,8 @@ struct Body {
 enum View {
     /// Hidden; only the tray icon shows.
     Tray,
+    /// Just the pet, out on the desktop.
+    Roam,
     Popover,
     Expanded,
 }
@@ -195,6 +209,8 @@ enum Act {
     Start(Job),
     Stop,
     Use(Item),
+    /// Water from the kitchen's cooler.
+    Drink,
     Sell(Item),
     Buy(Item),
     Unequip(Slot),
@@ -206,6 +222,8 @@ enum Act {
     Accept,
     Decline,
     View(View),
+    /// Close the window: the pet goes out on the desktop (true) or hides in the tray.
+    Out(bool),
     Tab(Tab),
     Quit,
     CloseReport,
@@ -232,6 +250,7 @@ struct App {
     room: Room,
     selected: Option<u64>,
     m: Motion,
+    roam: Roam,
     fx: Vec<Particle>,
     floaters: Vec<Floater>,
     said: HashMap<u64, (String, f64)>,
@@ -239,7 +258,8 @@ struct App {
     /// Room-change beat: the room cuts to black for a moment and the title hops.
     cut: f32,
     kick: f32,
-    disp: [f32; 5],
+    /// Smoothed bars: HP, energy, food, water, mood, XP.
+    disp: [f32; 6],
     heads: Vec<(u64, Pos2, Pos2, Anim)>,
     me_head: Option<Pos2>,
     scene_rect: Rect,
@@ -261,6 +281,10 @@ struct App {
     last_tip: f64,
     /// Something happened while hidden: the tray icon wears a badge until the window opens.
     attention: bool,
+    /// What the pet last asked for, so each need is announced once.
+    last_need: Option<Need>,
+    /// After the window closes, a needy pet waits this long before coming out of the tray by itself.
+    snooze: f64,
     screen: Vec2,
     ppp: f32,
     win_rect: Rect,
@@ -299,9 +323,36 @@ fn job_anim(j: Job) -> Anim {
     }
 }
 
+/// Where a need gets fixed.
+fn need_room(n: Need) -> Room {
+    match n {
+        Need::Sick => Room::Shop,
+        Need::Thirsty | Need::Hungry => Room::Kitchen,
+        Need::Tired => Room::Bedroom,
+        Need::Sad => Room::Home,
+    }
+}
+
+fn need_lines(n: Need) -> &'static [&'static str; 3] {
+    match n {
+        Need::Sick => &["I don't feel so good...", "*cough cough*", "Medicine, please..."],
+        Need::Thirsty => &["So thirsty...", "Water, please!", "*dry gulp*"],
+        Need::Hungry => &["I'm hungry...", "Food? Food!", "*tummy rumbles*"],
+        Need::Tired => &["*yawn*", "So sleepy...", "Nap time?"],
+        Need::Sad => &["Play with me?", "I'm lonely...", "*sigh*"],
+    }
+}
+
+/// Desktop notification, sent off the UI thread (some backends block until it's on screen).
+fn notify(title: String, body: String) {
+    std::thread::spawn(move || {
+        if let Err(e) = notify_rust::Notification::new().appname("LanPet").summary(&title).body(&body).show() {
+            eprintln!("lanpet: notification failed: {e}");
+        }
+    });
+}
+
 const IDLE_LINES: [&str; 8] = ["♪ la la la", "What are we working on?", "Pet me!", "*stretches*", "You got this!", "Snack break soon?", "Boop!", "Stay hydrated!"];
-const HUNGRY_LINES: [&str; 3] = ["I'm hungry...", "Food? Food!", "*tummy rumbles*"];
-const TIRED_LINES: [&str; 3] = ["*yawn*", "So sleepy...", "Nap time?"];
 const JOB_LINES: [(Job, [&str; 3]); 4] = [
     (Job::Study, ["Hmm, fascinating...", "Taking notes!", "Big brain time."]),
     (Job::Lift, ["One more rep!", "Feel the burn!", "GAINS!"]),
@@ -359,13 +410,15 @@ impl App {
                 chatter_at: 20.0,
                 hovered: false,
             },
+            // first time out it starts at the right edge (the position is clamped to the screen)
+            roam: Roam { pos: pos2(f32::MAX, 0.0), target_x: f32::MAX, wander_at: 0.0, held: false, still_at: 0.0 },
             fx: Vec::new(),
             floaters: Vec::new(),
             said: HashMap::new(),
             shake: 0.0,
             cut: 0.0,
             kick: 0.0,
-            disp: [0.0; 5],
+            disp: [0.0; 6],
             heads: Vec::new(),
             me_head: None,
             scene_rect: Rect::NOTHING,
@@ -386,6 +439,8 @@ impl App {
             last_wave: -10.0,
             last_tip: -10.0,
             attention: false,
+            last_need: None,
+            snooze: 0.0,
             screen: Vec2::new(1920.0, 1080.0),
             ppp: 1.0,
             win_rect: Rect::NOTHING,
@@ -400,6 +455,16 @@ impl App {
     /// Seconds since start. egui's own clock stops while the window is hidden; this one doesn't.
     fn now_t(&self) -> f64 {
         self.clock.elapsed().as_secs_f64()
+    }
+
+    /// The window is open (popover or expanded), as opposed to closed into the tray or the desktop pet.
+    fn open(&self) -> bool {
+        matches!(self.view, View::Popover | View::Expanded)
+    }
+
+    /// Closing the window leaves the pet out on the desktop: by choice, or for want of a tray to hide in.
+    fn lives_out(&self) -> bool {
+        self.save.pet.is_some() && (self.save.out || self.tray.is_none())
     }
 
     // -------------------------------------------------------------------------------------- where things are
@@ -449,6 +514,9 @@ impl App {
 
     fn my_anim(&self, t: f64) -> Anim {
         let Some(p) = &self.save.pet else { return Anim::Egg };
+        if self.view == View::Roam && self.roam.held {
+            return Anim::Hurt; // dangling from the cursor
+        }
         if t < self.m.react_until {
             return self.m.react;
         }
@@ -459,13 +527,35 @@ impl App {
         if let Some(j) = job {
             return job_anim(j);
         }
-        if p.hunger < 15.0 || p.mood < 20.0 || p.hp < p.total_max_hp() * 0.2 {
+        if p.sick {
+            Anim::Sick
+        } else if p.need().is_some() || p.hp < p.total_max_hp() * 0.2 {
             Anim::Sad
         } else if t < self.m.blink_until {
             Anim::Blink
         } else {
             Anim::Idle
         }
+    }
+
+    /// Our pet, standing at `feet`.
+    fn me_body(&self, feet: Pos2, t: f64) -> Option<Body> {
+        let pet = self.save.pet.as_ref()?;
+        let anim = self.my_anim(t);
+        Some(Body {
+            id: self.save.id,
+            species: pet.species,
+            stage: pet.stage(),
+            hat: pet.hat,
+            anim,
+            frame: self.art.frame(anim, t),
+            feet,
+            squash: vec2(1.0 + self.m.squash * 0.25, 1.0 - self.m.squash * 0.25),
+            flash: self.m.flash,
+            flip: self.m.flip,
+            name: None,
+            me: true,
+        })
     }
 
     fn bodies(&self, room: Room, t: f64) -> Vec<Body> {
@@ -484,6 +574,7 @@ impl App {
                 v.push(Body {
                     id: if left { self.save.id } else { u64::MAX - i as u64 },
                     species: f.sp[i],
+                    stage: f.st[i],
                     hat: f.hats[i],
                     anim,
                     frame: self.art.frame(anim, t + i as f64 * 0.37),
@@ -497,16 +588,17 @@ impl App {
             }
             return v;
         }
-        let Some(pet) = &self.save.pet else {
+        if self.save.pet.is_none() {
             if room == Room::Home {
                 let (frame, shake) = match self.hatch_at {
                     Some(s) => (1 + (((t - s) / 0.5) as usize).min(2), ((t - s) * 3.0) as f32),
                     None => ((t * 1.2) as usize % 2, 0.0),
                 };
                 let wob = (t as f32 * 40.0).sin() * shake;
-                v.push(Body {
+                let egg = Body {
                     id: 0,
                     species: Species::ALL[self.hatch_species],
+                    stage: Stage::Baby,
                     hat: None,
                     anim: Anim::Egg,
                     frame,
@@ -516,25 +608,18 @@ impl App {
                     flip: false,
                     name: None,
                     me: false,
-                });
+                };
+                // the pet that died of old age keeps watch until the next egg hatches
+                if let Some(old) = &self.save.late {
+                    let bob = (t * 1.6).sin() as f32 * 2.0;
+                    v.push(Body { id: 1, species: old.species, anim: Anim::Ghost, frame: self.art.frame(Anim::Ghost, t), feet: pos2(148.0, FLOOR_Y - 10.0 + bob), flip: true, name: None, ..egg });
+                }
+                v.push(egg);
             }
             return v;
-        };
+        }
         if self.pet_room() == Some(room) {
-            let anim = self.my_anim(t);
-            v.push(Body {
-                id: self.save.id,
-                species: pet.species,
-                hat: pet.hat,
-                anim,
-                frame: self.art.frame(anim, t),
-                feet: pos2(self.m.x, self.m.y + self.m.hop),
-                squash: vec2(1.0 + self.m.squash * 0.25, 1.0 - self.m.squash * 0.25),
-                flash: self.m.flash,
-                flip: self.m.flip,
-                name: None,
-                me: true,
-            });
+            v.extend(self.me_body(pos2(self.m.x, self.m.y + self.m.hop), t));
         }
         for (id, feet) in self.layout(room).1 {
             let Some(p) = self.peers.get(&id) else { continue };
@@ -543,6 +628,7 @@ impl App {
             v.push(Body {
                 id,
                 species: p.card.species,
+                stage: p.card.stage,
                 hat: p.card.hat,
                 anim,
                 frame: self.art.frame(anim, t + phase),
@@ -563,6 +649,7 @@ impl App {
             id: self.save.id,
             name: p.name.clone(),
             species: p.species,
+            stage: p.stage(),
             level: p.level,
             hat: p.hat,
             status: p.status(),
@@ -673,7 +760,7 @@ impl App {
                 self.say_me(format!("{} wants to battle!", card.name), t);
                 self.react(Anim::Happy, 1.0, t);
                 self.hop();
-                self.attention |= self.view == View::Tray;
+                self.attention |= !self.open();
                 self.incoming = Some(Incoming { battle, card, addr: from, until: t + 20.0 });
             }
             Msg::Accept { battle, card } => {
@@ -699,7 +786,7 @@ impl App {
                 if let Some(p) = &mut self.save.pet {
                     p.give(item, 1);
                     self.dirty = true;
-                    self.attention |= self.view == View::Tray;
+                    self.attention |= !self.open();
                     self.say_me(format!("{from} sent me a {}!", item.info().name), t);
                     self.react(Anim::Happy, 1.5, t);
                     let a = self.anchor();
@@ -735,6 +822,7 @@ impl App {
             hp: [a.fighter.hp, c.fighter.hp],
             shown: [a.fighter.hp as f32, c.fighter.hp as f32],
             sp: [a.species, c.species],
+            st: [a.stage, c.stage],
             hats: [a.hat, c.hat],
             f: [a.fighter, c.fighter],
             me,
@@ -752,7 +840,7 @@ impl App {
         self.incoming = None;
         self.pending = None;
         self.selected = None;
-        if self.view == View::Tray {
+        if !self.open() {
             self.want_view = Some(View::Popover);
         }
         self.last_hello = -10.0;
@@ -774,7 +862,7 @@ impl App {
                     self.float_earned(job, secs, 15.0);
                     match why {
                         Some(why) => {
-                            self.attention |= self.view == View::Tray;
+                            self.attention |= !self.open();
                             self.say_me(why, t);
                             self.react(Anim::Sad, 1.2, t);
                         }
@@ -790,14 +878,14 @@ impl App {
                     self.hop();
                 }
                 Event::Done(job) => {
-                    self.attention |= self.view == View::Tray;
+                    self.attention |= !self.open();
                     self.float_earned(job, job.secs(), 16.0);
                     self.burst(a, Fx::Spark(GOLD), 8, 90.0);
                     self.react(Anim::Happy, 1.2, t);
                     self.say_me(if job == Job::Sleep { "Good morning!" } else { "Done! That was fun." }, t);
                 }
                 Event::Back(rep) => {
-                    self.attention |= self.view == View::Tray;
+                    self.attention |= !self.open();
                     self.say_me(if rep.fled { "Ouch... I ran away." } else { "I'm back! Check my loot!" }, t);
                     self.react(if rep.fled { Anim::Sad } else { Anim::Happy }, 2.0, t);
                     self.m.x = self.art.spot(Room::Portal, false).x + 30.0;
@@ -805,6 +893,30 @@ impl App {
                     self.report = Some(rep);
                     self.confetti(a, 20);
                 }
+                Event::Grew(stage) => {
+                    self.float(a + vec2(0.0, -10.0), format!("{}!", stage.name().to_uppercase()), GOLD, 22.0);
+                    self.confetti(a, 30);
+                    self.burst(a, Fx::Star, 12, 150.0);
+                    self.react(Anim::Happy, 2.2, t);
+                    self.m.flash = 1.0;
+                    self.hop();
+                    self.say_me(if stage == Stage::Elder { "I feel wise... and a bit creaky." } else { "Look how big I am!" }, t);
+                    if let (Some(p), false) = (&self.save.pet, self.open()) {
+                        self.attention = true;
+                        let an = if stage == Stage::Teen { "a" } else { "an" };
+                        notify(format!("{} grew up!", p.name), format!("{} is {an} {} now.", p.name, stage.name().to_lowercase()));
+                    }
+                }
+                Event::Sick => {
+                    self.say_me("I don't feel so good...", t);
+                    self.react(Anim::Sad, 1.5, t);
+                }
+                Event::Healed => {
+                    self.say_me("I feel better!", t);
+                    self.react(Anim::Happy, 1.5, t);
+                    self.burst(a, Fx::Heart, 6, 70.0);
+                }
+                Event::Died => self.lay_to_rest(),
             }
         }
         if let Some((job, secs)) = paid {
@@ -812,6 +924,22 @@ impl App {
             let a = self.anchor();
             self.burst(a, Fx::Spark(GOLD), 3, 50.0);
         }
+    }
+
+    /// Old age: the pet becomes a memory, its things an inheritance, and a new egg waits to be hatched.
+    fn lay_to_rest(&mut self) {
+        let Some(old) = self.save.pet.take() else { return };
+        if !self.open() {
+            self.attention = true;
+            notify(format!("{} passed away", old.name), format!("{} good days. A new egg is waiting, with everything {} owned.", old.age / DAY, old.name));
+        }
+        self.save.late = Some(old);
+        (self.fight, self.report, self.incoming, self.pending, self.selected) = (None, None, None, None, None);
+        self.room = Room::Home;
+        self.hatch_name = game::random_name(&mut self.rng);
+        // no pet left to walk the desktop: the hatch screen takes over an open window, else it waits in the tray
+        self.want_view = Some(if self.open() || self.tray.is_none() { View::Popover } else { View::Tray });
+        self.persist();
     }
 
     /// Floats what `secs` of a job earned over the pet's head: XP in blue, the stat in green.
@@ -854,7 +982,10 @@ impl App {
         }
         if t - self.last_tip > 1.0 {
             self.last_tip = t;
-            let (tip, badge) = (self.tray_tip(), self.attention || (self.view == View::Tray && self.incoming.is_some()));
+            self.watch_needs(ctx, t);
+            let need = !self.open() && self.last_need.is_some();
+            let badge = if need { Badge::Need } else if self.attention || (!self.open() && self.incoming.is_some()) { Badge::Done } else { Badge::None };
+            let tip = self.tray_tip();
             if let Some(tr) = &mut self.tray {
                 tr.badge(badge);
                 tr.tooltip(tip);
@@ -862,7 +993,29 @@ impl App {
         }
     }
 
-    fn animate(&mut self, dt: f32, t: f64) {
+    /// The pet asking for care while the window is closed: a notification for each new need, and
+    /// out of the tray it comes to ask in person (back in once it's happy, unless it lives out there).
+    fn watch_needs(&mut self, ctx: &egui::Context, t: f64) {
+        let Some(pet) = &self.save.pet else { return };
+        let need = pet.need();
+        if need != self.last_need {
+            self.last_need = need;
+            if let (Some(n), false) = (need, self.open()) {
+                notify(format!("{} is {}", pet.name, n.label().to_lowercase()), format!("{}.", n.fix()));
+            }
+        }
+        match (self.view, need) {
+            (View::Tray, Some(n)) if t > self.snooze && self.pet_room().is_some() => {
+                self.set_view(ctx, View::Roam, None);
+                let line = *self.rng.pick(need_lines(n));
+                self.say_me(line, t);
+            }
+            (View::Roam, None) if !self.lives_out() => self.set_view(ctx, View::Tray, None),
+            _ => {}
+        }
+    }
+
+    fn animate(&mut self, ctx: &egui::Context, dt: f32, t: f64) {
         // hatching
         if let Some(start) = self.hatch_at {
             self.shake = self.shake.max(((t - start) * 2.0) as f32);
@@ -872,7 +1025,11 @@ impl App {
                     n if n.is_empty() => game::random_name(&mut self.rng),
                     n => n,
                 };
-                self.save.pet = Some(game::Pet::new(name.clone(), Species::ALL[self.hatch_species], now()));
+                let mut pet = game::Pet::new(name.clone(), Species::ALL[self.hatch_species], now());
+                if let Some(old) = self.save.late.take() {
+                    pet.inherit(old);
+                }
+                self.save.pet = Some(pet);
                 self.m.x = 100.0;
                 self.m.target_x = 100.0;
                 let a = self.anchor();
@@ -887,7 +1044,9 @@ impl App {
 
         // our pet's body
         let job = self.save.pet.as_ref().and_then(|p| p.task).map(|t| t.job);
-        if let Some(room) = self.pet_room().filter(|_| self.fight.is_none()) {
+        if self.view == View::Roam {
+            self.roam_step(ctx, job, dt, t);
+        } else if let Some(room) = self.pet_room().filter(|_| self.fight.is_none()) {
             let slot = self.layout(room).0;
             let target = match (slot, job) {
                 (Some(s), _) => s,
@@ -917,11 +1076,11 @@ impl App {
             } else if dx.abs() >= 3.0 {
                 self.m.y = FLOOR_Y;
             }
-            let happy = self.save.pet.as_ref().is_some_and(|p| p.mood > 60.0);
-            if job.is_none() && !self.m.moving && happy && t > self.m.hop_at {
-                self.m.hop_at = t + 5.0 + self.rng.f32() as f64 * 8.0;
-                self.hop();
-            }
+        }
+        let happy = self.save.pet.as_ref().is_some_and(|p| p.mood > 60.0 && p.need().is_none());
+        if job.is_none() && !self.m.moving && happy && t > self.m.hop_at {
+            self.m.hop_at = t + 5.0 + self.rng.f32() as f64 * 8.0;
+            self.hop();
         }
         if self.m.hop < 0.0 || self.m.vy < 0.0 {
             self.m.vy += 420.0 * dt;
@@ -940,12 +1099,12 @@ impl App {
             self.m.blink_at = t + 2.0 + self.rng.f32() as f64 * 3.5;
         }
         if t > self.m.chatter_at {
-            self.m.chatter_at = t + 35.0 + self.rng.f32() as f64 * 50.0;
-            if let Some(p) = &self.save.pet {
-                let line = if p.hunger < 25.0 {
-                    *self.rng.pick(&HUNGRY_LINES)
-                } else if p.energy < 20.0 {
-                    *self.rng.pick(&TIRED_LINES)
+            // a pet that needs something says so, and more often
+            let need = self.save.pet.as_ref().and_then(|p| p.need());
+            self.m.chatter_at = t + if need.is_some() { 12.0 + self.rng.f32() as f64 * 14.0 } else { 35.0 + self.rng.f32() as f64 * 50.0 };
+            if self.save.pet.is_some() {
+                let line = if let Some(n) = need {
+                    *self.rng.pick(need_lines(n))
                 } else if let Some((_, l)) = JOB_LINES.iter().find(|(j, _)| Some(*j) == job) {
                     *self.rng.pick(l)
                 } else {
@@ -991,7 +1150,7 @@ impl App {
         self.kick *= (-dt * 10.0).exp();
 
         if let Some(p) = &self.save.pet {
-            let target = [p.hp, p.energy, p.hunger, p.mood, p.xp];
+            let target = [p.hp, p.energy, p.hunger, p.thirst, p.mood, p.xp];
             let k = 1.0 - (-dt * 6.0).exp();
             for (d, v) in self.disp.iter_mut().zip(target) {
                 *d += (v - *d) * k;
@@ -1055,6 +1214,11 @@ impl App {
         let a = self.anchor();
         match act {
             Act::View(v) => self.set_view(ctx, v, None),
+            Act::Out(out) => {
+                self.save.out = out;
+                self.dirty = true;
+                self.set_view(ctx, View::Tray, None);
+            }
             Act::Tab(tab) => self.tab = tab,
             Act::Quit => self.quit(ctx),
             Act::Go(r) => {
@@ -1134,8 +1298,9 @@ impl App {
                     let info = it.info();
                     if matches!(info.slot, Slot::Food | Slot::Drink) {
                         self.react(Anim::Eat, 1.4, t);
-                        self.say_me(if info.slot == Slot::Food { "Nom nom!" } else { "Glug glug!" }, t);
-                        for (v, label, c) in [(info.fx.hunger, "Food", LEAF), (info.fx.hp.min(999.0), "HP", RED), (info.fx.energy, "Energy", GOLD), (info.fx.mood, "Mood", PINK)] {
+                        self.say_me(if it == Item::Medicine { "Yuck! ...but better." } else if info.slot == Slot::Food { "Nom nom!" } else { "Glug glug!" }, t);
+                        let fx = info.fx;
+                        for (v, label, c) in [(fx.hunger, "Food", LEAF), (fx.thirst, "Water", AQUA), (fx.hp.min(999.0), "HP", RED), (fx.energy, "Energy", GOLD), (fx.mood, "Mood", PINK)] {
                             if v > 0.0 {
                                 self.float(a, format!("+{v:.0} {label}"), c, 15.0);
                             }
@@ -1151,6 +1316,15 @@ impl App {
                 Some(Err(e)) => self.say_me(e, t),
                 None => {}
             },
+            Act::Drink => {
+                if let Some(p) = &mut self.save.pet {
+                    p.drink();
+                    self.dirty = true;
+                    self.react(Anim::Eat, 1.2, t);
+                    self.say_me("Glug glug!", t);
+                    self.float(a, "+40 Water", AQUA, 15.0);
+                }
+            }
             Act::Buy(it) => match self.save.pet.as_mut().map(|p| p.buy(it)) {
                 Some(Ok(())) => {
                     self.dirty = true;
@@ -1278,11 +1452,13 @@ impl eframe::App for App {
         let t = self.now_t();
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.track_window(&ctx, t);
-        self.animate(dt, t);
+        self.animate(&ctx, dt, t);
         let mut acts = Vec::new();
         self.keys(&ctx, &mut acts);
         if self.save.pet.is_none() {
             self.hatch_view(ui, t, &mut acts);
+        } else if self.view == View::Roam {
+            self.roam_view(ui, t, &mut acts);
         } else if self.view == View::Expanded {
             self.expanded_view(ui, t, &mut acts);
         } else {

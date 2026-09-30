@@ -1,6 +1,7 @@
-//! The window's three states (hidden in the tray, popover, expanded): showing, hiding, resizing,
-//! and placing it beside the tray icon.
+//! The window's states (hidden in the tray, the desktop pet, popover, expanded): showing, hiding,
+//! resizing, placing it beside the tray icon, and walking it along the screen as the desktop pet.
 
+use crate::game::Job;
 use crate::tray::TrayMsg;
 use crate::{App, View};
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
@@ -8,6 +9,10 @@ use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
 pub const POPOVER: Vec2 = Vec2::new(440.0, 354.0);
 pub const EXPANDED: Vec2 = Vec2::new(740.0, 438.0);
 pub const HATCH: Vec2 = Vec2::new(440.0, 460.0);
+/// The desktop pet: the sprite at 3x with headroom for a speech bubble.
+pub const ROAM: Vec2 = Vec2::new(150.0, 156.0);
+/// How long a needy pet stays in the tray after you close the window on it.
+const SNOOZE: f64 = 15.0 * 60.0;
 /// Where the popover opens when the tray can't say where its icon is: Windows' taskbar sits at the
 /// bottom, macOS and most Linux desktops keep their bar at the top.
 const BOTTOM_BAR: bool = cfg!(windows);
@@ -38,48 +43,124 @@ impl App {
     pub(crate) fn size(&self) -> Vec2 {
         if self.save.pet.is_none() {
             HATCH
-        } else if self.view == View::Expanded {
-            EXPANDED
         } else {
-            POPOVER
+            match self.view {
+                View::Roam => ROAM,
+                View::Expanded => EXPANDED,
+                _ => POPOVER,
+            }
         }
     }
 
-    /// Show, hide or resize the window. `near` is the tray icon (points), when known.
+    /// Show, hide or resize the window. `View::Tray` means "close it": the pet hides in the tray,
+    /// or walks the desktop if that's where it lives. `near` is the tray icon (points), when known.
     pub(crate) fn set_view(&mut self, ctx: &egui::Context, v: View, near: Option<Rect>) {
-        if v == View::Tray && (self.tray.is_none() || self.save.pet.is_none()) {
+        let v = if v == View::Tray && self.lives_out() { View::Roam } else { v };
+        if v == View::Tray && self.tray.is_none() {
             return; // nothing would bring the window back
         }
         let from = self.view;
+        let was_open = self.open();
         let t = self.now_t();
         self.view = v;
+        if was_open && !self.open() {
+            self.hidden_at = t;
+        }
         if v == View::Tray {
             if from != View::Tray {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                self.hidden_at = t;
+                self.snooze = t + SNOOZE;
             }
             return;
         }
-        if from == View::Tray {
+        if self.open() && !was_open {
             self.room = self.pet_room().unwrap_or(self.room);
             self.attention = false;
             self.shown_at = t;
             self.had_focus = false;
+        }
+        if was_open != self.open() || from == View::Tray {
+            // the room and the desktop pet don't share coordinates
             self.fx.clear();
             self.floaters.clear();
         }
         let size = self.size();
-        let pos = match near {
-            Some(icon) => place_near(Some(icon), size, self.screen, BOTTOM_BAR),
-            None if self.win_rect.is_positive() => keep_corner(self.win_rect, size, self.screen),
-            None => place_near(None, size, self.screen, BOTTOM_BAR),
+        let pos = if v == View::Roam {
+            // hop out of the window where it stood, else carry on from where the pet last walked
+            let x = if was_open { self.win_rect.center().x - size.x / 2.0 } else { self.roam.pos.x };
+            let floor = self.save.floor.unwrap_or(self.screen.y - size.y - if BOTTOM_BAR { 48.0 } else { 0.0 });
+            let pos = pos2(x.clamp(0.0, (self.screen.x - size.x).max(0.0)), floor.clamp(0.0, (self.screen.y - size.y).max(0.0)));
+            self.roam.pos = pos;
+            self.roam.target_x = pos.x;
+            self.roam.wander_at = t + 2.0;
+            self.roam.held = false;
+            pos
+        } else {
+            // the popover opens beside the tray icon, or beside the desktop pet it was opened from
+            match near.or((from == View::Roam).then_some(self.win_rect)) {
+                Some(icon) => place_near(Some(icon), size, self.screen, BOTTOM_BAR),
+                None if self.win_rect.is_positive() => keep_corner(self.win_rect, size, self.screen),
+                None => place_near(None, size, self.screen, BOTTOM_BAR),
+            }
         };
         self.win_rect = Rect::from_min_size(pos, size);
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         if from == View::Tray {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+        if self.open() && !was_open {
+            ctx.send_viewport_cmd(ViewportCommand::Focus); // the desktop pet never takes focus
+        }
+    }
+
+    /// The desktop pet: walks the window along the screen, idles, trains or sleeps where it
+    /// stands, and can be picked up and put down somewhere else (which becomes its floor).
+    pub(crate) fn roam_step(&mut self, ctx: &egui::Context, job: Option<Job>, dt: f32, t: f64) {
+        if self.roam.held {
+            // The OS is dragging the window and doesn't say when it lets go; still for a moment means put down.
+            if self.win_rect.min != self.roam.pos {
+                self.roam.pos = self.win_rect.min;
+                self.roam.still_at = t;
+            } else if t - self.roam.still_at > 0.35 {
+                self.roam.held = false;
+                self.roam.target_x = self.roam.pos.x;
+                self.roam.wander_at = t + 2.0;
+                self.save.floor = Some(self.roam.pos.y);
+                self.dirty = true;
+                self.m.sv += 6.0;
+            }
+            self.m.moving = false;
+            return;
+        }
+        const LAP: f32 = 300.0;
+        let max_x = (self.screen.x - ROAM.x).max(0.0);
+        let x = self.roam.pos.x;
+        match job {
+            // laps: turn around at the end of each, or at the edge of the screen
+            Some(Job::Run) if (self.roam.target_x - x).abs() <= 1.0 => {
+                let right = if x + LAP > max_x { false } else { x < LAP || self.m.flip };
+                self.roam.target_x = if right { x + LAP } else { x - LAP };
+            }
+            None if t > self.roam.wander_at => {
+                self.roam.wander_at = t + 4.0 + self.rng.f32() as f64 * 8.0;
+                if self.rng.chance(70) {
+                    self.roam.target_x = x + (self.rng.f32() - 0.5) * 700.0;
+                }
+            }
+            _ => {}
+        }
+        self.roam.target_x = self.roam.target_x.clamp(0.0, max_x);
+        let dx = self.roam.target_x - x;
+        self.m.moving = dx.abs() > 1.0 && t >= self.m.react_until && (job.is_none() || job == Some(Job::Run));
+        if self.m.moving {
+            let speed = if job == Some(Job::Run) { 160.0 } else { 50.0 };
+            let before = self.roam.pos.round();
+            self.roam.pos.x += dx.signum() * (speed * dt).min(dx.abs());
+            self.m.flip = dx < 0.0;
+            if self.roam.pos.round() != before {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.roam.pos.round()));
+            }
         }
     }
 
@@ -89,7 +170,7 @@ impl App {
             match m {
                 TrayMsg::Click(at) => {
                     let near = at.map(|r| Rect::from_min_max((r.min.to_vec2() / self.ppp).to_pos2(), (r.max.to_vec2() / self.ppp).to_pos2()));
-                    if self.view != View::Tray {
+                    if self.open() {
                         self.set_view(ctx, View::Tray, None);
                     } else if t - self.hidden_at > 0.35 {
                         // A click right after the popover hid itself (it lost focus to that very click) means "close".
@@ -97,10 +178,17 @@ impl App {
                     }
                 }
                 TrayMsg::Open => {
-                    if self.view == View::Tray {
-                        self.set_view(ctx, View::Popover, None);
-                    } else {
+                    if self.open() {
                         ctx.send_viewport_cmd(ViewportCommand::Focus);
+                    } else {
+                        self.set_view(ctx, View::Popover, None);
+                    }
+                }
+                TrayMsg::Out => {
+                    self.save.out = !self.save.out;
+                    self.dirty = true;
+                    if !self.open() {
+                        self.set_view(ctx, View::Tray, None);
                     }
                 }
                 TrayMsg::Quit => self.quit(ctx),

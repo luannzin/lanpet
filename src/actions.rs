@@ -2,8 +2,8 @@
 //! and the one-line status under the room name.
 
 use crate::art::Room;
-use crate::game::{Item, Job, Pet, Slot, ZONES, now};
-use crate::{Act, App, Tab, View, job_room};
+use crate::game::{DAY, Item, Job, Need, Pet, Slot, Stage, ZONES, now};
+use crate::{Act, App, Tab, View, job_room, need_room};
 
 /// One thing you can do: a button in the popover, a row in the expanded list.
 pub(crate) struct Btn {
@@ -79,6 +79,30 @@ fn mmss(s: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// Roughly how long `secs` is: "3d", "5h", "20 min".
+fn span(secs: u64) -> String {
+    if secs >= DAY {
+        format!("{}d", secs / DAY)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{} min", secs.div_ceil(60))
+    }
+}
+
+/// Where the pet is in its life and how well it's being kept, e.g. "Grows into a teen in 5h · Care 4/5".
+pub(crate) fn life_line(pet: &Pet) -> String {
+    let stage = pet.stage();
+    let left = span(stage.ends().saturating_sub(pet.age));
+    let next = match stage {
+        Stage::Baby => format!("Grows into a teen in {left}"),
+        Stage::Teen => format!("Grown up in {left}"),
+        Stage::Adult => format!("Grows old in {left}"),
+        Stage::Elder => format!("{left} left to enjoy together"),
+    };
+    format!("{next} · Care {:.0}/5", pet.care * 5.0)
+}
+
 fn job_verb(j: Job) -> &'static str {
     match j {
         Job::Study => "Study",
@@ -95,7 +119,7 @@ fn fx_text(it: Item) -> String {
     if f.hp >= 999.0 {
         return "Full heal".into();
     }
-    let parts: Vec<String> = [(f.hunger, "Food"), (f.energy, "Energy"), (f.hp, "HP"), (f.mood, "Mood")]
+    let parts: Vec<String> = [(f.hunger, "Food"), (f.thirst, "Water"), (f.energy, "Energy"), (f.hp, "HP"), (f.mood, "Mood")]
         .into_iter()
         .filter(|(v, _)| *v > 0.0)
         .take(2)
@@ -111,6 +135,9 @@ impl App {
         if let Some(f) = &self.fight {
             return format!("Battle: {} vs {}", f.f[f.me].name, f.f[1 - f.me].name);
         }
+        if let Some(n) = pet.need() {
+            return format!("{} is {} · {}", pet.name, n.label().to_lowercase(), n.fix());
+        }
         if let Some(task) = pet.task {
             let left = mmss(task.end.saturating_sub(now()));
             return match task.job {
@@ -121,8 +148,6 @@ impl App {
         }
         let names: Vec<&str> = self.peers_in(self.room).map(|p| p.card.name.as_str()).collect();
         match names.as_slice() {
-            [] if pet.hunger < 25.0 => format!("{} is hungry", pet.name),
-            [] if pet.energy < 20.0 => format!("{} is tired", pet.name),
             [] => format!("{} is hanging out", pet.name),
             [a] => format!("{a} is here"),
             [a, b] => format!("{a} & {b} are here"),
@@ -134,6 +159,9 @@ impl App {
         let Some(pet) = &self.save.pet else { return "LanPet".into() };
         if let Some(inc) = &self.incoming {
             return format!("LanPet · {} wants to battle!", inc.card.name);
+        }
+        if let Some(n) = pet.need() {
+            return format!("LanPet · {} is {}", pet.name, n.label().to_lowercase());
         }
         match pet.task {
             Some(task) => {
@@ -188,6 +216,17 @@ impl App {
             }
             return finish(v, full);
         }
+        // what the pet needs comes first: the cure if it's at hand, else the way to the room that has it
+        match pet.need() {
+            Some(Need::Sick) if pet.bag.contains_key(&Item::Medicine) => {
+                v.push(Btn::new("Give medicine", "Cures the sickness", "Give", vec![Act::Use(Item::Medicine)]).item(Item::Medicine));
+            }
+            Some(n) if need_room(n) != self.room => {
+                let room = need_room(n);
+                v.push(Btn::new(format!("{}!", n.label()), format!("To the {}", room.name()), "Go", vec![Act::Go(room)]));
+            }
+            _ => {}
+        }
         let busy = pet.task.is_some();
         let job_here = pet.task.filter(|t| !matches!(t.job, Job::Explore(_)) && job_room(t.job) == self.room);
         if let Some(task) = job_here {
@@ -212,6 +251,7 @@ impl App {
                 v.push(job(Job::Run, "10 min · +8 HP, +Spd"));
             }
             Room::Kitchen => {
+                let first = v.len();
                 let food: Vec<(Item, u32)> = pet.bag.iter().filter(|(i, _)| matches!(i.info().slot, Slot::Food | Slot::Drink)).map(|(&i, &n)| (i, n)).collect();
                 for &(it, n) in &food {
                     let verb = if it.info().slot == Slot::Drink { "Drink" } else { "Eat" };
@@ -221,17 +261,27 @@ impl App {
                     let price = Item::Apple.info().price;
                     v.push(Btn::new("Quick apple", format!("Buy & eat · {price} gold"), format!("{price} g"), vec![Act::Buy(Item::Apple), Act::Use(Item::Apple)]).item(Item::Apple).off_if(pet.gold < price));
                 }
+                // water's free: first when thirst is the bigger need, else right after the first bite
+                let at = if pet.thirst <= pet.hunger { first } else { (first + 1).min(v.len()) };
+                v.insert(at, Btn::new("Water", "+40 Water · free", "Drink", vec![Act::Drink]));
             }
             Room::Portal => match pet.task {
                 Some(task) if matches!(task.job, Job::Explore(_)) => {
                     v.push(Btn::new(task.job.label(), "Out adventuring", "Away", vec![]).timer(task.end).off_if(true));
                 }
                 _ => {
+                    let baby = pet.stage() == Stage::Baby;
                     for (i, z) in ZONES.iter().enumerate() {
                         let locked = pet.level < z.min_level;
-                        let sub = if locked { format!("Unlocks at Lv {}", z.min_level) } else { format!("{} min · foes Lv {}–{}", z.mins, z.foe_level.0, z.foe_level.1) };
-                        let go = if locked { format!("Lv {}", z.min_level) } else { "Go".into() };
-                        v.push(Btn::new(z.name, sub, go, vec![Act::Start(Job::Explore(i as u8))]).off_if(locked || busy));
+                        let sub = if baby {
+                            "Too little to explore. Babies stay home".into()
+                        } else if locked {
+                            format!("Unlocks at Lv {}", z.min_level)
+                        } else {
+                            format!("{} min · foes Lv {}–{}", z.mins, z.foe_level.0, z.foe_level.1)
+                        };
+                        let go = if baby { "Teen".into() } else if locked { format!("Lv {}", z.min_level) } else { "Go".into() };
+                        v.push(Btn::new(z.name, sub, go, vec![Act::Start(Job::Explore(i as u8))]).off_if(baby || locked || busy));
                     }
                 }
             },
@@ -251,7 +301,7 @@ impl App {
                 }
             }
             Room::Shop => {
-                let featured = [Item::Coffee, Item::Cake, Item::Potion];
+                let featured = if pet.sick { [Item::Medicine, Item::Coffee, Item::Cake] } else { [Item::Coffee, Item::Cake, Item::Potion] };
                 let items: Vec<Item> = if full { Item::ALL.into_iter().filter(|i| i.info().price > 0).collect() } else { featured.to_vec() };
                 for it in items {
                     let price = it.info().price;
@@ -276,6 +326,7 @@ impl App {
                 Some(it) => (format!("Have the {}", it.info().name), vec![Act::Use(it)]),
                 None => (format!("Buy & eat an apple · {} gold", Item::Apple.info().price), vec![Act::Buy(Item::Apple), Act::Use(Item::Apple)]),
             },
+            "drink" => ("Drink water".into(), vec![Act::Drink]),
             "explore" => (format!("Explore {} · {} min", ZONES[0].name, ZONES[0].mins), vec![Act::Start(Job::Explore(0))]),
             "challenge" => match self.peers.values().next() {
                 Some(p) => (format!("Battle {}", p.card.name), vec![Act::Challenge(p.card.id)]),

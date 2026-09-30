@@ -103,6 +103,81 @@ impl Species {
     }
 }
 
+// ------------------------------------------------------------------------------------------ life
+
+pub const DAY: u64 = 86_400;
+/// A whole life, in seconds lived. The clock runs while the app is closed too.
+pub const LIFE: u64 = 30 * DAY;
+
+/// Life stages, in `STAGES` order from the asset generator (each has its own sprites).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Stage {
+    Baby,
+    Teen,
+    #[default]
+    Adult,
+    Elder,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 4] = [Stage::Baby, Stage::Teen, Stage::Adult, Stage::Elder];
+
+    pub fn name(self) -> &'static str {
+        ["Baby", "Teen", "Adult", "Elder"][self as usize]
+    }
+    /// Age at which the stage is over; an elder's end is the end of its life.
+    pub fn ends(self) -> u64 {
+        [DAY, 4 * DAY, 24 * DAY, LIFE][self as usize]
+    }
+    fn at(age: u64) -> Stage {
+        Stage::ALL.into_iter().find(|s| age < s.ends()).unwrap_or(Stage::Elder)
+    }
+    /// How demanding the pet is: needs run down (and neglect builds up) this much faster.
+    fn appetite(self) -> f32 {
+        [1.8, 1.3, 1.0, 1.3][self as usize]
+    }
+    /// Growth spurt on reaching the stage, for a perfectly cared-for pet: (max HP, STR, MANA, SPD).
+    fn spurt(self) -> (f32, f32, f32, f32) {
+        [(0.0, 0.0, 0.0, 0.0), (6.0, 2.0, 2.0, 1.0), (10.0, 3.0, 3.0, 1.5), (0.0, 0.0, 4.0, 0.0)][self as usize]
+    }
+    /// Size on screen next to an adult.
+    pub fn size(self) -> f32 {
+        [0.68, 0.86, 1.0, 1.0][self as usize]
+    }
+}
+
+/// What the pet is asking for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Need {
+    Sick,
+    Thirsty,
+    Hungry,
+    Tired,
+    Sad,
+}
+
+impl Need {
+    pub fn label(self) -> &'static str {
+        match self {
+            Need::Sick => "Sick",
+            Need::Thirsty => "Thirsty",
+            Need::Hungry => "Hungry",
+            Need::Tired => "Sleepy",
+            Need::Sad => "Sad",
+        }
+    }
+    /// How to help, for the status line and notifications.
+    pub fn fix(self) -> &'static str {
+        match self {
+            Need::Sick => "Medicine or a good sleep helps",
+            Need::Thirsty => "Water's in the Kitchen",
+            Need::Hungry => "Food's in the Kitchen",
+            Need::Tired => "The bed's in the Bedroom",
+            Need::Sad => "Pets and treats help",
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------ items
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -116,6 +191,7 @@ pub enum Item {
     EnergyDrink,
     Potion,
     MegaPotion,
+    Medicine,
     WoodSword,
     IronSword,
     DragonBlade,
@@ -144,10 +220,11 @@ pub enum Slot {
     Hat,
 }
 
-/// What an item does. Consumables use hunger/hp/energy/mood; gear uses hp (max) and the combat stats.
+/// What an item does. Consumables use hunger/thirst/hp/energy/mood; gear uses hp (max) and the combat stats.
 #[derive(Clone, Copy, Default)]
 pub struct Fx {
     pub hunger: f32,
+    pub thirst: f32,
     pub hp: f32,
     pub energy: f32,
     pub mood: f32,
@@ -169,9 +246,9 @@ pub struct Info {
 }
 
 impl Item {
-    pub const ALL: [Item; 25] = [
+    pub const ALL: [Item; 26] = [
         Item::Apple, Item::Burger, Item::Cake, Item::Sushi, Item::GoldenFish, Item::Coffee, Item::EnergyDrink,
-        Item::Potion, Item::MegaPotion, Item::WoodSword, Item::IronSword, Item::DragonBlade, Item::MagicWand,
+        Item::Potion, Item::MegaPotion, Item::Medicine, Item::WoodSword, Item::IronSword, Item::DragonBlade, Item::MagicWand,
         Item::ArcaneOrb, Item::LeatherVest, Item::KnightArmor, Item::LuckyClover, Item::SpeedBoots, Item::PartyHat,
         Item::Flower, Item::Headphones, Item::WizardHat, Item::CowboyHat, Item::Crown, Item::Halo,
     ];
@@ -185,10 +262,11 @@ impl Item {
             Item::Cake => ("Cake", Food, 35, 0, Fx { hunger: 30.0, mood: 25.0, ..z }, "Every day is a birthday."),
             Item::Sushi => ("Sushi", Food, 30, 1, Fx { hunger: 35.0, hp: 25.0, mood: 10.0, ..z }, "Fancy lunch."),
             Item::GoldenFish => ("Golden Fish", Food, 0, 2, Fx { hunger: 100.0, hp: 999.0, mood: 30.0, ..z }, "Full heal. Shiny."),
-            Item::Coffee => ("Coffee", Drink, 12, 0, Fx { energy: 25.0, mood: 5.0, ..z }, "Office fuel."),
-            Item::EnergyDrink => ("Energy Drink", Drink, 30, 0, Fx { energy: 60.0, mood: -5.0, ..z }, "Zoom. Crash later."),
+            Item::Coffee => ("Coffee", Drink, 12, 0, Fx { thirst: 15.0, energy: 25.0, mood: 5.0, ..z }, "Office fuel."),
+            Item::EnergyDrink => ("Energy Drink", Drink, 30, 0, Fx { thirst: 20.0, energy: 60.0, mood: -5.0, ..z }, "Zoom. Crash later."),
             Item::Potion => ("Potion", Drink, 25, 0, Fx { hp: 50.0, ..z }, "Heals 50. Auto-used on expeditions."),
             Item::MegaPotion => ("Mega Potion", Drink, 70, 1, Fx { hp: 150.0, energy: 20.0, ..z }, "Heals 150."),
+            Item::Medicine => ("Medicine", Drink, 40, 0, z, "Cures sickness. Yuck."),
             Item::WoodSword => ("Wood Sword", Weapon, 40, 0, Fx { str: 3.0, ..z }, "+3 STR"),
             Item::IronSword => ("Iron Sword", Weapon, 160, 1, Fx { str: 8.0, ..z }, "+8 STR"),
             Item::DragonBlade => ("Dragon Blade", Weapon, 0, 3, Fx { str: 18.0, spd: 2.0, ..z }, "+18 STR +2 SPD"),
@@ -247,6 +325,14 @@ impl Job {
             Job::Study => 8.0,
             Job::Lift | Job::Run => 12.0,
             Job::Sleep => 4.0,
+            Job::Explore(_) => 20.0,
+        }
+    }
+    fn thirst_cost(self) -> f32 {
+        match self {
+            Job::Study => 5.0,
+            Job::Lift | Job::Run => 15.0,
+            Job::Sleep => 2.0,
             Job::Explore(_) => 20.0,
         }
     }
@@ -418,6 +504,16 @@ pub fn battle(a: &Fighter, b: &Fighter, seed: u64) -> Battle {
 pub const BEAT: u64 = 60;
 /// Enough energy to start a job; it ends on its own when energy runs out.
 const MIN_ENERGY: f32 = 5.0;
+/// Below this a need counts as unmet: the pet asks for it.
+const LOW: f32 = 25.0;
+/// Idle time is simulated in steps this long, so needs bottoming out mid-gap are noticed.
+const STEP: u64 = 600;
+/// A gap longer than this means the app was closed. The pet looked after itself meanwhile:
+/// needs run down at `AWAY_RATE` and it can't fall sick, so a weekend away isn't a death sentence.
+const AWAY: u64 = 300;
+const AWAY_RATE: f32 = 0.25;
+/// Hours of an unmet need (for an adult) before the pet falls sick.
+const SICK_AT: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Task {
@@ -457,6 +553,12 @@ pub enum Event {
     /// Ended early after `secs` of work: by you (`why` None) or because the pet ran out of steam.
     Stopped { job: Job, secs: u64, why: Option<&'static str> },
     Back(Report),
+    /// Reached a new life stage.
+    Grew(Stage),
+    Sick,
+    Healed,
+    /// Old age. The pet stops ticking; the app lays it to rest.
+    Died,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -473,7 +575,21 @@ pub struct Pet {
     pub energy: f32,
     /// Fullness: 100 = stuffed, 0 = starving.
     pub hunger: f32,
+    /// Hydration: 100 = quenched, 0 = parched.
+    #[serde(default = "old_thirst")]
+    pub thirst: f32,
     pub mood: f32,
+    /// Seconds lived; decides the life stage.
+    #[serde(default = "old_age")]
+    pub age: u64,
+    #[serde(default)]
+    pub sick: bool,
+    /// Neglect built up, in hours of an unmet need; at `SICK_AT` the pet falls sick, at 0 it's well again.
+    #[serde(default)]
+    pub strain: f32,
+    /// How well it's been looked after lately, 0..1. Sets how big the next growth spurt is.
+    #[serde(default = "old_care")]
+    pub care: f32,
     pub gold: u32,
     pub bag: BTreeMap<Item, u32>,
     pub weapon: Option<Item>,
@@ -484,6 +600,17 @@ pub struct Pet {
     pub last: u64,
     pub wins: u32,
     pub losses: u32,
+}
+
+// Pets from saves that predate life stages: a young adult, watered and well cared for.
+fn old_age() -> u64 {
+    Stage::Teen.ends()
+}
+fn old_thirst() -> f32 {
+    70.0
+}
+fn old_care() -> f32 {
+    1.0
 }
 
 /// 30, 70, 120, 180… first level comes after one session, later ones take a while.
@@ -507,7 +634,12 @@ impl Pet {
             spd,
             energy: 80.0,
             hunger: 70.0,
+            thirst: 70.0,
             mood: 70.0,
+            age: 0,
+            sick: false,
+            strain: 0.0,
+            care: 1.0,
             gold: 60,
             bag: BTreeMap::from([(Item::Apple, 3), (Item::Coffee, 1)]),
             weapon: None,
@@ -518,6 +650,39 @@ impl Pet {
             last: now,
             wins: 0,
             losses: 0,
+        }
+    }
+
+    pub fn stage(&self) -> Stage {
+        Stage::at(self.age)
+    }
+    pub fn alive(&self) -> bool {
+        self.age < LIFE
+    }
+    fn exploring(&self) -> bool {
+        matches!(self.task, Some(Task { job: Job::Explore(_), .. }))
+    }
+    fn sleeping(&self) -> bool {
+        matches!(self.task, Some(Task { job: Job::Sleep, .. }))
+    }
+
+    /// The most pressing thing the pet wants from you right now. Nothing while it's away
+    /// exploring (out of reach), and a sleeping pet only wakes you for food and water.
+    pub fn need(&self) -> Option<Need> {
+        if self.exploring() {
+            None
+        } else if self.sick && !self.sleeping() {
+            Some(Need::Sick)
+        } else if self.thirst < LOW && self.thirst <= self.hunger {
+            Some(Need::Thirsty)
+        } else if self.hunger < LOW {
+            Some(Need::Hungry)
+        } else if self.energy < LOW && self.task.is_none() {
+            Some(Need::Tired)
+        } else if self.mood < LOW && !self.sleeping() {
+            Some(Need::Sad)
+        } else {
+            None
         }
     }
 
@@ -577,17 +742,30 @@ impl Pet {
     fn clamp(&mut self) {
         self.energy = self.energy.clamp(0.0, 100.0);
         self.hunger = self.hunger.clamp(0.0, 100.0);
+        self.thirst = self.thirst.clamp(0.0, 100.0);
         self.mood = self.mood.clamp(0.0, 100.0);
         self.hp = self.hp.clamp(0.0, self.total_max_hp());
     }
 
     /// Advance the simulation to `now`, catching up any time spent offline.
     pub fn tick(&mut self, now: u64, ev: &mut Vec<Event>) {
-        while self.last < now {
-            let next = self.task.map_or(now, |t| t.next_beat(self.last));
-            let end = next.min(now).max(self.last);
-            self.integrate((end - self.last) as f32, ev);
+        let away = now.saturating_sub(self.last) > AWAY;
+        while self.last < now && self.alive() {
+            let stage = self.stage();
+            let beat = self.task.map(|t| t.next_beat(self.last));
+            // stop at the next payout, the next birthday into a new stage, or after a short step
+            let end = beat.unwrap_or(now).min(self.last + STEP).min(self.last + stage.ends() - self.age).min(now).max(self.last);
+            self.integrate((end - self.last) as f32, away, ev);
+            self.age += end - self.last;
             self.last = end;
+            if !self.alive() {
+                self.task = None;
+                ev.push(Event::Died);
+                break;
+            }
+            if self.stage() != stage {
+                self.grow(ev);
+            }
             let Some(t) = self.task else { continue };
             if end >= t.end {
                 self.task = None;
@@ -595,10 +773,22 @@ impl Pet {
             } else if let Some(why) = self.out_of_steam(t.job) {
                 self.task = None;
                 ev.push(Event::Stopped { job: t.job, secs: end - t.start, why: Some(why) });
-            } else if end == next && !matches!(t.job, Job::Explore(_)) {
+            } else if Some(end) == beat && !matches!(t.job, Job::Explore(_)) {
                 ev.push(Event::Paid(t.job));
             }
         }
+    }
+
+    /// A new life stage: a growth spurt as big as the care it got, and a full heal.
+    fn grow(&mut self, ev: &mut Vec<Event>) {
+        let stage = self.stage();
+        let (hp, str, mana, spd) = stage.spurt();
+        self.max_hp += hp * self.care;
+        self.str += str * self.care;
+        self.mana += mana * self.care;
+        self.spd += spd * self.care;
+        self.hp = self.total_max_hp();
+        ev.push(Event::Grew(stage));
     }
 
     /// Why a job can't go on (expeditions always finish).
@@ -606,28 +796,53 @@ impl Pet {
         match job {
             Job::Explore(_) => None,
             _ if self.hunger <= 5.0 => Some("Too hungry to keep going!"),
+            _ if self.thirst <= 5.0 => Some("Too thirsty to keep going!"),
             Job::Sleep => None,
+            _ if self.sick => Some("I don't feel well..."),
             _ if self.energy <= 0.0 => Some("Too tired to keep going!"),
             _ => None,
         }
     }
 
-    fn integrate(&mut self, dt: f32, ev: &mut Vec<Event>) {
+    /// Neglect builds up into sickness and good care mends it; how well the pet is kept is
+    /// remembered for its next growth spurt. Only counts while you're around to help (or it sleeps).
+    fn tend(&mut self, h: f32, ev: &mut Vec<Event>) {
+        let unmet = [self.hunger <= 5.0, self.thirst <= 5.0, self.energy <= 2.0, self.mood <= 5.0].into_iter().filter(|&b| b).count() as f32;
+        // one full sleep, fed and watered, sleeps any sickness off
+        let mend = if self.sleeping() { 6.0 } else { 0.5 };
+        let change = if unmet > 0.0 { unmet * self.stage().appetite() } else { -mend };
+        self.strain = (self.strain + change * h).clamp(0.0, SICK_AT + 0.5);
+        if self.strain >= SICK_AT && !self.sick {
+            self.sick = true;
+            ev.push(Event::Sick);
+        } else if self.strain <= 0.0 && self.sick {
+            self.sick = false;
+            ev.push(Event::Healed);
+        }
+        let well = if self.sick { 0.0 } else { (self.hunger.min(self.thirst).min(self.mood) / 50.0).min(1.0) };
+        self.care = (self.care + (well - self.care) * (1.0 - (-h / 4.0).exp())).clamp(0.0, 1.0);
+    }
+
+    fn integrate(&mut self, dt: f32, away: bool, ev: &mut Vec<Event>) {
         if dt <= 0.0 {
             return;
         }
         let h = dt / 3600.0;
         let max = self.total_max_hp();
-        self.hunger -= 4.0 * h;
-        self.mood -= 2.0 * h;
-        if self.hunger <= 0.0 {
-            self.mood -= 6.0 * h;
-            self.hp -= 0.05 * max * h;
-        } else if self.hunger > 30.0 {
+        // what time alone wears down: slower while the app was closed, faster for the young and old
+        let wear = h * if away { AWAY_RATE } else { 1.0 };
+        let appetite = self.stage().appetite();
+        self.hunger -= 4.0 * appetite * wear;
+        self.thirst -= 6.0 * appetite * wear;
+        self.mood -= 2.0 * appetite * wear;
+        if self.hunger <= 0.0 || self.thirst <= 0.0 || self.sick {
+            self.mood -= 6.0 * wear;
+            self.hp -= 0.05 * max * wear;
+        } else if self.hunger > 30.0 && self.thirst > 30.0 {
             self.hp += 0.15 * max * h;
         }
         if self.energy < 10.0 {
-            self.mood -= 3.0 * h;
+            self.mood -= 3.0 * wear;
         }
         match self.task {
             None => self.energy += 4.0 * h,
@@ -635,6 +850,7 @@ impl Pet {
                 let frac = dt / t.job.secs() as f32;
                 self.energy -= t.job.energy_cost() * frac;
                 self.hunger -= t.job.hunger_cost() * frac;
+                self.thirst -= t.job.thirst_cost() * frac;
                 let (xp, gain, _) = self.job_gain(t.job);
                 match t.job {
                     Job::Study => self.mana += gain * frac,
@@ -656,6 +872,9 @@ impl Pet {
             }
         }
         self.clamp();
+        if (!away || self.sleeping()) && !self.exploring() {
+            self.tend(h, ev);
+        }
     }
 
     fn finish(&mut self, t: Task, ev: &mut Vec<Event>) {
@@ -672,7 +891,13 @@ impl Pet {
         if self.task.is_some() {
             return Err("I'm busy!");
         }
+        if self.sick && job != Job::Sleep {
+            return Err("I feel too sick...");
+        }
         if let Job::Explore(z) = job {
+            if self.stage() == Stage::Baby {
+                return Err("I'm too little to explore!");
+            }
             if self.level < ZONES[z as usize].min_level {
                 return Err("Too scary for my level...");
             }
@@ -688,6 +913,9 @@ impl Pet {
             }
             if self.hunger < 10.0 {
                 return Err("Too hungry!");
+            }
+            if self.thirst < 10.0 {
+                return Err("Too thirsty!");
             }
         }
         self.task = Some(Task { job, start: now, end: now + job.secs(), seed });
@@ -744,13 +972,32 @@ impl Pet {
             None => {
                 let f = info.fx;
                 self.hunger += f.hunger;
+                self.thirst += f.thirst;
                 self.hp += f.hp;
                 self.energy += f.energy;
                 self.mood += f.mood;
+                if it == Item::Medicine {
+                    self.sick = false;
+                    self.strain = 0.0;
+                }
             }
         }
         self.clamp();
         Ok(())
+    }
+
+    /// A cup from the kitchen's water cooler.
+    pub fn drink(&mut self) {
+        self.thirst = (self.thirst + 40.0).min(100.0);
+    }
+
+    /// A new egg takes over what the last pet left behind: its gold and everything it owned.
+    pub fn inherit(&mut self, old: Pet) {
+        self.gold += old.gold;
+        let worn = [old.weapon, old.armor, old.charm, old.hat].into_iter().flatten().map(|it| (it, 1));
+        for (it, n) in old.bag.into_iter().chain(worn) {
+            self.give(it, n);
+        }
     }
 
     pub fn unequip(&mut self, slot: Slot) {
@@ -846,12 +1093,13 @@ impl Pet {
         rep
     }
 
-    /// Short status for the LAN list, e.g. "Lifting" or "Chilling".
+    /// Short status for the LAN list, e.g. "Lifting", "Hungry" or "Chilling".
     pub fn status(&self) -> String {
-        self.task.map_or_else(
-            || if self.hunger < 15.0 { "Hungry".into() } else if self.energy < 15.0 { "Sleepy".into() } else { "Chilling".into() },
-            |t| t.job.label(),
-        )
+        match (self.task, self.need()) {
+            (Some(t), _) => t.job.label(),
+            (None, Some(n)) => n.label().into(),
+            (None, None) => "Chilling".into(),
+        }
     }
 }
 
@@ -884,6 +1132,15 @@ pub fn random_name(rng: &mut Rng) -> String {
 pub struct Save {
     pub id: u64,
     pub pet: Option<Pet>,
+    /// The pet that died of old age, until the next egg inherits its things.
+    #[serde(default)]
+    pub late: Option<Pet>,
+    /// When the window closes the pet walks the desktop instead of hiding in the tray.
+    #[serde(default)]
+    pub out: bool,
+    /// Where on the screen (y, points) the desktop pet walks: wherever it was last dropped.
+    #[serde(default)]
+    pub floor: Option<f32>,
 }
 
 impl Save {
@@ -905,7 +1162,7 @@ impl Save {
     }
 
     pub fn load(path: &Path) -> Save {
-        let fresh = || Save { id: Rng::seeded().next(), pet: None };
+        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None };
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 // Never silently overwrite a save we can't read.
@@ -990,6 +1247,7 @@ mod tests {
                 let wins = (0..200)
                     .filter(|&seed| {
                         let mut p = Pet::new("A".into(), s, 0);
+                        p.age = Stage::Baby.ends(); // babies stay home
                         p.start(Job::Explore(0), 0, seed).unwrap();
                         let mut ev = Vec::new();
                         p.tick(10_000, &mut ev);
@@ -1005,12 +1263,60 @@ mod tests {
     }
 
     #[test]
+    fn pets_grow_up_need_care_and_die_of_old_age() {
+        let mut p = Pet::new("A".into(), Species::Dino, 0);
+        assert_eq!(p.stage(), Stage::Baby);
+        assert!(p.start(Job::Explore(0), 0, 1).is_err(), "babies stay home");
+        // app open, nobody looking after it: it asks for water, then falls sick
+        let (mut ev, mut now) = (Vec::new(), 0);
+        while !p.sick {
+            now += 60;
+            p.tick(now, &mut ev);
+            assert!(now < DAY, "neglect never made it sick");
+            assert!(p.thirst > 5.0 || p.need() == Some(Need::Thirsty) || p.sick);
+        }
+        assert!(ev.iter().any(|e| matches!(e, Event::Sick)));
+        assert_eq!(p.need(), Some(Need::Sick));
+        assert!(p.start(Job::Lift, now, 1).is_err(), "too sick to train");
+        p.give(Item::Medicine, 1);
+        p.use_item(Item::Medicine).unwrap();
+        p.drink();
+        assert!(!p.sick && p.need() != Some(Need::Thirsty));
+        // it grows up while the app is closed, stronger for the care it got
+        let str0 = p.str;
+        p.tick(now + DAY, &mut ev);
+        assert_eq!(p.stage(), Stage::Teen);
+        assert!(p.str > str0 && p.str < str0 + 2.0, "a neglected baby gets a small spurt: {}", p.str - str0);
+        p.tick(now + LIFE, &mut ev);
+        let grew: Vec<Stage> = ev.iter().filter_map(|e| if let Event::Grew(s) = e { Some(*s) } else { None }).collect();
+        assert_eq!(grew, [Stage::Teen, Stage::Adult, Stage::Elder]);
+        assert!(!p.alive() && matches!(ev.last(), Some(Event::Died)));
+        // a closed app never makes a pet sick, however long it's away
+        let mut q = Pet::new("B".into(), Species::Frog, 0);
+        q.tick(10 * DAY, &mut ev);
+        assert!(!q.sick && q.stage() == Stage::Adult);
+        // the next egg gets the old pet's things
+        p.weapon = Some(Item::IronSword);
+        let gold = p.gold + q.gold;
+        q.inherit(p);
+        assert_eq!((q.gold, q.bag.get(&Item::IronSword)), (gold, Some(&1)));
+    }
+
+    #[test]
     fn save_round_trips() {
-        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)) };
+        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0) };
         let back: Save = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
-        assert_eq!(back.pet.unwrap().bag.get(&Item::Apple), Some(&3));
+        assert_eq!(back.pet.as_ref().unwrap().bag.get(&Item::Apple), Some(&3));
+        assert!(back.out && back.floor == Some(900.0));
         // saves from before the tray still load (they carried a window position)
         let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0]}"#).unwrap();
         assert_eq!(old.id, 7);
+        // pets from before life stages load as young adults
+        let mut pet = serde_json::to_value(back.pet.unwrap()).unwrap();
+        for k in ["age", "thirst", "sick", "strain", "care"] {
+            pet.as_object_mut().unwrap().remove(k);
+        }
+        let pet: Pet = serde_json::from_value(pet).unwrap();
+        assert_eq!((pet.stage(), pet.thirst, pet.sick), (Stage::Adult, 70.0, false));
     }
 }
