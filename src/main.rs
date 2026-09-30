@@ -391,7 +391,8 @@ impl App {
         };
         let mut rng = Rng::seeded();
         let hatch_name = game::random_name(&mut rng);
-        App {
+        let room = Room::ALL.get(save.room as usize).copied().unwrap_or(Room::Home);
+        let mut app = App {
             art: Art::load(&ctx),
             tray: Tray::start(&ctx),
             update: update::Updater::start(),
@@ -406,7 +407,7 @@ impl App {
             view: View::Popover,
             tab: Tab::Here,
             want_view: None,
-            room: Room::Home,
+            room,
             selected: None,
             m: Motion {
                 x: 100.0,
@@ -467,7 +468,10 @@ impl App {
             hidden_at: -10.0,
             had_focus: false,
             dirty: false,
-        }
+        };
+        // the window starts open: show the room the pet is in (or working in)
+        app.room = app.pet_room().unwrap_or(app.room);
+        app
     }
 
     /// Seconds since start. egui's own clock stops while the window is hidden; this one doesn't.
@@ -748,6 +752,7 @@ impl App {
     // -------------------------------------------------------------------------------------- per-frame logic
 
     fn persist(&mut self) {
+        self.save.room = self.pet_room().unwrap_or(self.room) as u8;
         if let Err(e) = self.save.store(&self.path) {
             eprintln!("lanpet: saving failed: {e}");
         }
@@ -915,6 +920,15 @@ impl App {
         for e in ev {
             let a = self.anchor();
             self.dirty = true;
+            // a job ending out of sight leaves the pet where it worked, which is where the window opens next
+            let worked = match &e {
+                Event::Done(j) | Event::Stopped { job: j, .. } => Some(job_room(*j)),
+                Event::Back(_) => Some(Room::Portal),
+                _ => None,
+            };
+            if let (Some(r), false) = (worked, self.open()) {
+                self.room = r;
+            }
             match e {
                 Event::Paid(job) => paid = Some((job, paid.map_or(0, |p| p.1) + BEAT)),
                 Event::Stopped { job, secs, why } => {

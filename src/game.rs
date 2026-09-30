@@ -1141,6 +1141,9 @@ pub struct Save {
     /// Where on the screen (y, points) the desktop pet walks: wherever it was last dropped.
     #[serde(default)]
     pub floor: Option<f32>,
+    /// Room the pet was last in (index into `Room::ALL`), so the window opens there after a restart.
+    #[serde(default)]
+    pub room: u8,
 }
 
 impl Save {
@@ -1167,7 +1170,7 @@ impl Save {
     }
 
     pub fn load(path: &Path) -> Save {
-        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None };
+        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None, room: 0 };
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 // Never silently overwrite a save we can't read.
@@ -1309,10 +1312,10 @@ mod tests {
 
     #[test]
     fn save_round_trips() {
-        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0) };
+        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0), room: 4 };
         let back: Save = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(back.pet.as_ref().unwrap().bag.get(&Item::Apple), Some(&3));
-        assert!(back.out && back.floor == Some(900.0));
+        assert!(back.out && back.floor == Some(900.0) && back.room == 4);
         // saves from before the tray still load (they carried a window position)
         let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0]}"#).unwrap();
         assert_eq!(old.id, 7);
