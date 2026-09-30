@@ -1146,9 +1146,14 @@ pub struct Save {
 impl Save {
     /// `LANPET_SAVE` overrides the location (handy for running two pets on one machine).
     pub fn path() -> PathBuf {
-        if let Some(p) = std::env::var_os("LANPET_SAVE") {
-            return p.into();
+        match std::env::var_os("LANPET_SAVE") {
+            Some(p) => p.into(),
+            None => Save::dir().join("save.json"),
         }
+    }
+
+    /// LanPet's own folder in the user's data directory.
+    pub fn dir() -> PathBuf {
         let base = if cfg!(windows) {
             std::env::var_os("APPDATA").map(PathBuf::from)
         } else if cfg!(target_os = "macos") {
@@ -1158,7 +1163,7 @@ impl Save {
                 .map(PathBuf::from)
                 .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         };
-        base.unwrap_or_default().join("lanpet").join("save.json")
+        base.unwrap_or_default().join("lanpet")
     }
 
     pub fn load(path: &Path) -> Save {

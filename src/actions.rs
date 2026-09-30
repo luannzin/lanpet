@@ -240,6 +240,10 @@ impl App {
         };
         match self.room {
             Room::Home => {
+                if let Some((ver, _)) = &self.update.ready {
+                    let sub = if self.update.installing { "Installing…".to_string() } else { format!("{ver} is ready · LanPet restarts") };
+                    v.push(Btn::new("Update LanPet", sub, "Update", vec![Act::Update]).off_if(self.update.installing));
+                }
                 let n: u32 = pet.bag.values().sum();
                 v.push(Btn::new("Pet", format!("{} loves it · +Mood", pet.name), "Pet", vec![Act::PetIt]));
                 v.push(Btn::new("Bag", format!("{n} item{}", if n == 1 { "" } else { "s" }), "Open", vec![Act::View(View::Expanded), Act::Tab(Tab::Bag)]));

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds dist/LanPet.app (universal: Apple Silicon + Intel) and dist/LanPet-macos.zip. Run on a Mac.
+# Builds dist/LanPet.app (universal: Apple Silicon + Intel) and dist/LanPet.dmg, the disk image you
+# drag LanPet into Applications from. Run on a Mac.
 #   tools/build-macos.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,7 +11,7 @@ cargo build --release --target aarch64-apple-darwin
 cargo build --release --target x86_64-apple-darwin
 
 app=dist/LanPet.app
-rm -rf "$app" dist/LanPet-macos.zip
+rm -rf "$app" dist/LanPet.dmg
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create -output "$app/Contents/MacOS/lanpet" \
     target/aarch64-apple-darwin/release/lanpet target/x86_64-apple-darwin/release/lanpet
@@ -46,5 +47,14 @@ EOF
 # Ad-hoc signature: required for Apple Silicon. Not notarized, so a browser-downloaded copy needs
 # System Settings > Privacy & Security > Open Anyway once (or: xattr -dr com.apple.quarantine LanPet.app).
 codesign --force --deep --sign - "$app"
-ditto -c -k --keepParent "$app" dist/LanPet-macos.zip
-echo "Built $app and dist/LanPet-macos.zip"
+
+stage=$(mktemp -d)
+ditto "$app" "$stage/LanPet.app"
+ln -s /Applications "$stage/Applications"
+# hdiutil now and then fails with "Resource busy" on CI runners; a retry gets through
+for try in 1 2 3; do
+    hdiutil create -volname LanPet -srcfolder "$stage" -format UDZO -ov dist/LanPet.dmg && break
+    [ "$try" = 3 ] && exit 1
+    sleep 5
+done
+echo "Built $app and dist/LanPet.dmg"

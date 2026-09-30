@@ -11,6 +11,7 @@ mod game;
 mod look;
 mod net;
 mod tray;
+mod update;
 mod view;
 mod window;
 
@@ -233,6 +234,8 @@ enum Act {
     Hatch,
     PetIt,
     Say(String),
+    /// Install the downloaded new version and restart as it.
+    Update,
 }
 
 struct App {
@@ -243,6 +246,7 @@ struct App {
     net: Option<Net>,
     net_err: Option<String>,
     tray: Option<Tray>,
+    update: update::Updater,
     clock: Instant,
     peers: BTreeMap<u64, Peer>,
     fresh: Vec<u64>,
@@ -379,6 +383,7 @@ impl App {
         App {
             art: Art::load(&ctx),
             tray: Tray::start(&ctx),
+            update: update::Updater::start(),
             clock: Instant::now(),
             save,
             path,
@@ -731,6 +736,28 @@ impl App {
         let msgs: Vec<_> = net.rx.try_iter().collect();
         for (from, m) in msgs {
             self.on_msg(from, m, t);
+        }
+    }
+
+    /// News from the updater: a new version to offer at Home, or time to restart as it.
+    fn poll_update(&mut self, ctx: &egui::Context, t: f64) {
+        let msgs: Vec<_> = self.update.rx.try_iter().collect();
+        for m in msgs {
+            match m {
+                update::Msg::Ready(v, file) => {
+                    self.say_me(format!("LanPet {v} is out! Update me at Home."), t);
+                    self.update.ready = Some((v, file));
+                }
+                update::Msg::Installed => {
+                    self.quit(ctx);
+                    update::relaunch();
+                }
+                update::Msg::Failed(e) => {
+                    self.update.installing = false;
+                    self.say_me(format!("Update failed: {e}"), t);
+                    self.react(Anim::Sad, 1.2, t);
+                }
+            }
         }
     }
 
@@ -1399,6 +1426,10 @@ impl App {
                     self.send(inc.addr, &Msg::Decline { battle: inc.battle, why: "said not right now".into() });
                 }
             }
+            Act::Update => {
+                self.update.install();
+                self.say_me("Updating... see you in a sec!", t);
+            }
             Act::CloseReport => self.report = None,
             Act::CloseFight => {
                 self.fight = None;
@@ -1442,6 +1473,7 @@ impl eframe::App for App {
         let t = self.now_t();
         self.handle_tray(ctx, t);
         self.poll_net(t);
+        self.poll_update(ctx, t);
         self.simulate(t);
         self.housekeeping(ctx, t);
         if self.view == View::Tray {

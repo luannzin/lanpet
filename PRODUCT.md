@@ -6,7 +6,7 @@
 
 desktop
 
-Native desktop app (Rust, eframe/egui 0.36, immediate-mode custom-painted UI) shipped for Linux (AppImage, X11/XWayland), Windows and macOS. Undecorated, transparent, always-on-top windows; no web runtime.
+Native desktop app (Rust, eframe/egui 0.36, immediate-mode custom-painted UI) shipped as installers for Linux (.deb, X11/XWayland), Windows and macOS, updating itself from GitHub Releases. Undecorated, transparent, always-on-top windows; no web runtime.
 
 ## Users
 

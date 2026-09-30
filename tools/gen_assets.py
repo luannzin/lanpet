@@ -1169,9 +1169,11 @@ def main():
         rooms.paste(img, (0, i * RH))
         meta["rooms"].append({"name": name, **info, "slots": SLOTS[name], "hot": HOT[name]})
     rooms.save(os.path.join(ROOT, "rooms.png"))
-    # app icon (AppImage / macOS .app): happy dino, 16x so platform downscaling stays crisp
+    # app icon (.deb, macOS .app, Windows installer): happy dino, 16x so platform downscaling stays crisp
     happy = sheets["dino"].crop((0, adult + 5 * F, F, adult + 6 * F))
-    happy.resize((512, 512), Image.NEAREST).save(os.path.join(ROOT, "icon.png"))
+    icon = happy.resize((512, 512), Image.NEAREST)
+    icon.save(os.path.join(ROOT, "icon.png"))
+    icon.save(os.path.join(ROOT, "icon.ico"), sizes=[(s, s) for s in (16, 32, 48, 64, 128, 256)])
     tray_icons(happy)
     with open(os.path.join(ROOT, "meta.json"), "w") as fh:
         json.dump(meta, fh, separators=(",", ":"))

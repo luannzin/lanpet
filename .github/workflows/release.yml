@@ -1,47 +1,65 @@
 name: release
 
-# Push a tag like v0.1.0 to build Linux, Windows and macOS binaries and publish a GitHub Release.
-# "Run workflow" on the Actions tab builds the same artifacts without publishing.
+# Every push to main whose Cargo.toml version has no release yet builds the installers (Linux .deb,
+# Windows setup .exe, macOS .dmg) and publishes them as release v<version>; installed copies then
+# update themselves to it. To ship: bump `version` in Cargo.toml and push.
+# "Run workflow" on the Actions tab builds the same files without publishing.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency: release
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: version
+    if: needs.version.outputs.new == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-22.04 = oldest glibc we support, so the Linux build runs on 22.04 and newer.
+        # ubuntu-22.04 = oldest glibc we support, so the .deb runs on 22.04 and newer.
         os: [ubuntu-22.04, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable --no-self-update && rustup default stable
 
-      - name: Linux (tests, AppImage, tarball)
+      - name: Linux (tests, .deb)
         if: runner.os == 'Linux'
         run: |
           # skip the real-broadcast test: CI runners have no LAN
           cargo test --release -- --skip two_pets_find_each_other
-          curl -fsSL -o tools/appimagetool-x86_64.AppImage \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x tools/appimagetool-x86_64.AppImage
-          APPIMAGE_EXTRACT_AND_RUN=1 tools/build-appimage.sh
-          tar -czf dist/lanpet-linux-x86_64.tar.gz -C target/release lanpet
+          tools/build-deb.sh
 
-      - name: Windows (exe)
+      - name: Windows (installer)
         if: runner.os == 'Windows'
         shell: bash
-        run: |
-          cargo build --release
-          mkdir -p dist
-          7z a dist/lanpet-windows-x86_64.zip ./target/release/lanpet.exe
+        run: tools/build-windows.sh
 
-      - name: macOS (universal .app)
+      - name: macOS (universal .app in a .dmg)
         if: runner.os == 'macOS'
         run: tools/build-macos.sh
 
@@ -49,14 +67,14 @@ jobs:
         with:
           name: lanpet-${{ runner.os }}
           path: |
-            dist/*.AppImage
-            dist/*.tar.gz
-            dist/*.zip
+            dist/*.deb
+            dist/*.exe
+            dist/*.dmg
           if-no-files-found: error
 
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version, build]
+    if: github.event_name == 'push' && needs.version.outputs.new == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -66,6 +84,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        # the asset names are what the in-app updater downloads (src/update.rs ASSET)
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "LanPet $GITHUB_REF_NAME" --generate-notes
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "LanPet $TAG" --generate-notes
