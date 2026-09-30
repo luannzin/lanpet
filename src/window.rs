@@ -4,13 +4,13 @@
 use crate::game::Job;
 use crate::tray::TrayMsg;
 use crate::{App, View};
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, pos2};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, WindowLevel, pos2};
 
 pub const POPOVER: Vec2 = Vec2::new(440.0, 354.0);
 pub const EXPANDED: Vec2 = Vec2::new(740.0, 438.0);
 pub const HATCH: Vec2 = Vec2::new(440.0, 460.0);
-/// The desktop pet: the sprite at 3x with headroom for a speech bubble.
-pub const ROAM: Vec2 = Vec2::new(150.0, 156.0);
+/// The desktop pet: the sprite at 2x with headroom for a speech bubble.
+pub const ROAM: Vec2 = Vec2::new(140.0, 132.0);
 /// How long a needy pet stays in the tray after you close the window on it.
 const SNOOZE: f64 = 15.0 * 60.0;
 /// Where the popover opens when the tray can't say where its icon is: Windows' taskbar sits at the
@@ -109,6 +109,8 @@ impl App {
         if from == View::Tray {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         }
+        // X11 forgets "always on top" each time the window leaves the screen, so ask again once it's back
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
         if self.open() && !was_open {
             ctx.send_viewport_cmd(ViewportCommand::Focus); // the desktop pet never takes focus
         }
@@ -211,6 +213,10 @@ impl App {
         }
         if let Some(r) = outer {
             self.win_rect = r;
+        }
+        if ctx.cumulative_frame_nr() == 1 {
+            // eframe shows the window after its first frame; X11 ignored "always on top" while it was still hidden
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
         }
         if !self.placed && monitor.is_some() {
             self.placed = true;

@@ -646,7 +646,7 @@ impl App {
     /// Just the pet, on a see-through window that `roam_step` walks along the screen.
     /// Click to open the popover beside it; drag to carry it somewhere else.
     pub(crate) fn roam_view(&mut self, ui: &mut Ui, t: f64, acts: &mut Vec<Act>) {
-        const SCALE: f32 = 3.0;
+        const SCALE: f32 = 2.0;
         let win = ui.max_rect();
         self.scene_rect = win;
         self.heads.clear();

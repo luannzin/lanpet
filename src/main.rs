@@ -53,6 +53,8 @@ fn main() -> eframe::Result {
         .with_has_shadow(false) // macOS would shadow the transparent area
         .with_resizable(false)
         .with_always_on_top()
+        // X11: not a "normal" window, so shell extensions that frame, round or shadow app windows leave the pet see-through
+        .with_window_type(egui::X11WindowType::Utility)
         .with_taskbar(false);
     let options = eframe::NativeOptions { viewport: vp, ..Default::default() };
     eframe::run_native("lanpet", options, Box::new(move |cc| Ok(Box::new(App::new(cc, save, path)))))
