@@ -3,14 +3,20 @@
 
 use crate::game::Job;
 use crate::tray::TrayMsg;
-use crate::{App, View};
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, WindowLevel, pos2};
+use crate::{App, ChatLine, View};
+use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, WindowLevel, pos2, vec2};
 
 pub const POPOVER: Vec2 = Vec2::new(440.0, 354.0);
 pub const EXPANDED: Vec2 = Vec2::new(740.0, 438.0);
 pub const HATCH: Vec2 = Vec2::new(440.0, 460.0);
-/// The desktop pet: the sprite at 2x with headroom for a speech bubble.
-pub const ROAM: Vec2 = Vec2::new(140.0, 132.0);
+/// The desktop pet's sprite scale (points per sprite pixel).
+pub const ROAM_SCALE: f32 = 1.5;
+/// The desktop pet: the sprite with headroom for a speech bubble.
+pub const ROAM: Vec2 = Vec2::new(120.0, 108.0);
+/// The desktop pet with its chat log open: wider, and grown upward from the same feet.
+pub const ROAM_LOG: Vec2 = Vec2::new(220.0, 230.0);
+/// How long a new chat line or bit of news stays up over the desktop pet.
+const FRESH: f64 = 8.0;
 /// How long a needy pet stays in the tray after you close the window on it.
 const SNOOZE: f64 = 15.0 * 60.0;
 /// Where the popover opens when the tray can't say where its icon is: Windows' taskbar sits at the
@@ -37,6 +43,20 @@ fn keep_corner(cur: Rect, size: Vec2, screen: Vec2) -> Pos2 {
     let x = if cur.center().x > screen.x / 2.0 { cur.max.x - size.x } else { cur.min.x };
     let y = if cur.center().y > screen.y / 2.0 { cur.max.y - size.y } else { cur.min.y };
     pos2(x.max(0.0), y.max(0.0))
+}
+
+/// Leftmost and rightmost x for the desktop pet, keeping its chat log on screen when it opens.
+fn roam_span(screen: Vec2) -> (f32, f32) {
+    let m = (ROAM_LOG.x - ROAM.x) / 2.0;
+    (m, (screen.x - ROAM.x - m).max(m))
+}
+
+/// The desktop pet's window: its own ROAM box at `pos`, or grown for the log around it, sharing
+/// the box's bottom centre so the pet doesn't move when the log opens.
+fn roam_rect(pos: Pos2, log: bool) -> Rect {
+    let size = if log { ROAM_LOG } else { ROAM };
+    let feet = pos + vec2(ROAM.x / 2.0, ROAM.y);
+    Rect::from_min_size(feet - vec2(size.x / 2.0, size.y), size)
 }
 
 impl App {
@@ -89,11 +109,13 @@ impl App {
             // hop out of the window where it stood, else carry on from where the pet last walked
             let x = if was_open { self.win_rect.center().x - size.x / 2.0 } else { self.roam.pos.x };
             let floor = self.save.floor.unwrap_or(self.screen.y - size.y - if BOTTOM_BAR { 48.0 } else { 0.0 });
-            let pos = pos2(x.clamp(0.0, (self.screen.x - size.x).max(0.0)), floor.clamp(0.0, (self.screen.y - size.y).max(0.0)));
+            let (min_x, max_x) = roam_span(self.screen);
+            let pos = pos2(x.clamp(min_x, max_x), floor.clamp(0.0, (self.screen.y - size.y).max(0.0)));
             self.roam.pos = pos;
             self.roam.target_x = pos.x;
             self.roam.wander_at = t + 2.0;
             self.roam.held = false;
+            self.roam.log = false; // `roam_step` opens it again if there's news
             pos
         } else {
             // the popover opens beside the tray icon, or beside the desktop pet it was opened from
@@ -116,13 +138,32 @@ impl App {
         }
     }
 
+    /// Chat in our pet's room and its own news, newest first, for the desktop pet: the last few
+    /// while hovered, else only what arrived since the window closed, for a few seconds.
+    pub(crate) fn roam_lines(&self, t: f64) -> impl Iterator<Item = &ChatLine> {
+        let room = self.pet_room();
+        let all = self.m.hovered;
+        self.chat
+            .iter()
+            .rev()
+            .filter(move |l| l.room.is_none_or(|r| Some(r) == room))
+            .filter(move |l| all || (l.at >= self.hidden_at && t - l.at < FRESH))
+            .take(6)
+    }
+
+    /// How faded a line over the desktop pet is: 1 until it has nearly timed out (or while hovered).
+    pub(crate) fn roam_fade(&self, l: &ChatLine, t: f64) -> f32 {
+        if self.m.hovered { 1.0 } else { (FRESH - (t - l.at)).clamp(0.0, 1.0) as f32 }
+    }
+
     /// The desktop pet: walks the window along the screen, idles, trains or sleeps where it
     /// stands, and can be picked up and put down somewhere else (which becomes its floor).
     pub(crate) fn roam_step(&mut self, ctx: &egui::Context, job: Option<Job>, dt: f32, t: f64) {
         if self.roam.held {
             // The OS is dragging the window and doesn't say when it lets go; still for a moment means put down.
-            if self.win_rect.min != self.roam.pos {
-                self.roam.pos = self.win_rect.min;
+            let pos = pos2(self.win_rect.center().x - ROAM.x / 2.0, self.win_rect.max.y - ROAM.y);
+            if pos != self.roam.pos {
+                self.roam.pos = pos;
                 self.roam.still_at = t;
             } else if t - self.roam.still_at > 0.35 {
                 self.roam.held = false;
@@ -135,13 +176,20 @@ impl App {
             self.m.moving = false;
             return;
         }
+        let log = self.roam_lines(t).next().is_some();
+        if log != self.roam.log {
+            self.roam.log = log;
+            let r = roam_rect(self.roam.pos, self.roam.log);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(r.size()));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min.round()));
+        }
         const LAP: f32 = 300.0;
-        let max_x = (self.screen.x - ROAM.x).max(0.0);
+        let (min_x, max_x) = roam_span(self.screen);
         let x = self.roam.pos.x;
         match job {
             // laps: turn around at the end of each, or at the edge of the screen
             Some(Job::Run) if (self.roam.target_x - x).abs() <= 1.0 => {
-                let right = if x + LAP > max_x { false } else { x < LAP || self.m.flip };
+                let right = if x + LAP > max_x { false } else { x < min_x + LAP || self.m.flip };
                 self.roam.target_x = if right { x + LAP } else { x - LAP };
             }
             None if t > self.roam.wander_at => {
@@ -152,16 +200,17 @@ impl App {
             }
             _ => {}
         }
-        self.roam.target_x = self.roam.target_x.clamp(0.0, max_x);
+        self.roam.target_x = self.roam.target_x.clamp(min_x, max_x);
         let dx = self.roam.target_x - x;
         self.m.moving = dx.abs() > 1.0 && t >= self.m.react_until && (job.is_none() || job == Some(Job::Run));
         if self.m.moving {
             let speed = if job == Some(Job::Run) { 160.0 } else { 50.0 };
-            let before = self.roam.pos.round();
+            let before = roam_rect(self.roam.pos, self.roam.log).min.round();
             self.roam.pos.x += dx.signum() * (speed * dt).min(dx.abs());
             self.m.flip = dx < 0.0;
-            if self.roam.pos.round() != before {
-                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.roam.pos.round()));
+            let now = roam_rect(self.roam.pos, self.roam.log).min.round();
+            if now != before {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(now));
             }
         }
     }
@@ -248,7 +297,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::vec2;
 
     #[test]
     fn windows_open_beside_the_tray_and_keep_their_corner() {
@@ -267,5 +315,19 @@ mod tests {
         assert_eq!(keep_corner(cur, EXPANDED, screen) + EXPANDED, cur.max);
         let cur = Rect::from_min_size(pos2(40.0, 40.0), POPOVER);
         assert_eq!(keep_corner(cur, EXPANDED, screen), cur.min);
+    }
+
+    #[test]
+    fn desktop_pet_log_opens_above_it_and_on_screen() {
+        let screen = vec2(1920.0, 1080.0);
+        let (min_x, max_x) = roam_span(screen);
+        for x in [min_x, 900.0, max_x] {
+            let pos = pos2(x, 900.0);
+            let (small, big) = (roam_rect(pos, false), roam_rect(pos, true));
+            assert_eq!(small.min, pos);
+            // same feet, so the pet stays put while the window grows up and out around it
+            assert_eq!((big.center().x, big.max.y), (small.center().x, small.max.y));
+            assert!(big.min.x >= 0.0 && big.max.x <= screen.x);
+        }
     }
 }

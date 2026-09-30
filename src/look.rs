@@ -217,7 +217,7 @@ pub fn die(p: &Painter, c: Pos2) {
 }
 
 /// Speech bubble with a stepped pixel tail, kept inside `bounds`.
-pub fn bubble(p: &Painter, head: Pos2, text: &str, bounds: Rect, pop: f32) {
+pub fn bubble(p: &Painter, head: Pos2, text: &str, bounds: Rect, pop: f32) -> Rect {
     let g = p.layout(text.to_owned(), FontId::proportional(13.0), INK, (bounds.width() - 26.0).min(160.0));
     let size = g.size() + vec2(14.0, 8.0);
     let lift = 12.0 + (1.0 - pop) * 6.0;
@@ -231,4 +231,5 @@ pub fn bubble(p: &Painter, head: Pos2, text: &str, bounds: Rect, pop: f32) {
         p.rect_filled(Rect::from_min_size(pos2(tip_x - w / 2.0, r.max.y + k - 2.0), vec2(w, 2.0)), 0.0, BUBBLE);
     }
     p.galley(r.min + vec2(7.0, 4.0), g, INK);
+    r.expand(2.0)
 }

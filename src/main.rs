@@ -83,11 +83,14 @@ struct Incoming {
     until: f64,
 }
 
+/// A line in the chat log: something said in a room, or our pet's own news (`room` and `name` None).
 struct ChatLine {
-    room: Room,
-    name: String,
+    room: Option<Room>,
+    name: Option<String>,
     text: String,
     mine: bool,
+    /// When it arrived, so the desktop pet can pop it up for a moment.
+    at: f64,
 }
 
 struct Fight {
@@ -172,6 +175,8 @@ struct Roam {
     /// Picked up: the OS drags the window until it has sat still for a moment.
     held: bool,
     still_at: f64,
+    /// The window has grown upward to show the chat log above the pet.
+    log: bool,
 }
 
 struct Body {
@@ -418,7 +423,7 @@ impl App {
                 hovered: false,
             },
             // first time out it starts at the right edge (the position is clamped to the screen)
-            roam: Roam { pos: pos2(f32::MAX, 0.0), target_x: f32::MAX, wander_at: 0.0, held: false, still_at: 0.0 },
+            roam: Roam { pos: pos2(f32::MAX, 0.0), target_x: f32::MAX, wander_at: 0.0, held: false, still_at: 0.0, log: false },
             fx: Vec::new(),
             floaters: Vec::new(),
             said: HashMap::new(),
@@ -710,6 +715,18 @@ impl App {
         self.say(id, text, t, 3.5);
     }
 
+    fn log(&mut self, line: ChatLine) {
+        self.chat.push(line);
+        if self.chat.len() > 100 {
+            self.chat.remove(0);
+        }
+    }
+
+    /// Our pet's own news (visits, gifts, meals, needs...) for the chat log and the desktop pet.
+    fn news(&mut self, text: impl Into<String>, t: f64) {
+        self.log(ChatLine { room: None, name: None, text: text.into(), mine: true, at: t });
+    }
+
     fn react(&mut self, anim: Anim, secs: f64, t: f64) {
         self.m.react = anim;
         self.m.react_until = t + secs;
@@ -787,6 +804,7 @@ impl App {
                     return;
                 }
                 self.say_me(format!("{} wants to battle!", card.name), t);
+                self.news(format!("{} challenged you to a battle", card.name), t);
                 self.react(Anim::Happy, 1.0, t);
                 self.hop();
                 self.attention |= !self.open();
@@ -801,11 +819,13 @@ impl App {
                 if let Some(p) = self.pending.take_if(|p| p.battle == battle) {
                     let name = self.peers.get(&p.peer).map_or("They".to_string(), |x| x.card.name.clone());
                     self.say_me(format!("{name} {why}."), t);
+                    self.news(format!("{name} {why}."), t);
                     self.react(Anim::Sad, 1.2, t);
                 }
             }
             Msg::Wave { from } => {
                 self.say_me(format!("{from} says hi!"), t);
+                self.news(format!("{from} waved at you"), t);
                 self.react(Anim::Happy, 1.2, t);
                 self.hop();
                 let a = self.anchor();
@@ -817,6 +837,7 @@ impl App {
                     self.dirty = true;
                     self.attention |= !self.open();
                     self.say_me(format!("{from} sent me a {}!", item.info().name), t);
+                    self.news(format!("{from} gave you a {}", item.info().name), t);
                     self.react(Anim::Happy, 1.5, t);
                     let a = self.anchor();
                     self.confetti(a, 24);
@@ -826,10 +847,13 @@ impl App {
                 if id == self.save.id {
                     return;
                 }
-                self.chat.push(ChatLine { room: Room::ALL[room as usize], name, text: text.clone(), mine: false });
-                if self.chat.len() > 100 {
-                    self.chat.remove(0);
+                let room = Room::ALL[room as usize];
+                // hidden in the tray, talk in our pet's room is a notification (the desktop pet shows it itself)
+                if self.view == View::Tray && self.pet_room() == Some(room) {
+                    self.attention = true;
+                    notify(format!("{name} in the {}", room.name()), text.clone());
                 }
+                self.log(ChatLine { room: Some(room), name: Some(name), text: text.clone(), mine: false, at: t });
                 self.say(id, text, t, 6.0);
             }
         }
@@ -893,6 +917,7 @@ impl App {
                         Some(why) => {
                             self.attention |= !self.open();
                             self.say_me(why, t);
+                            self.news(format!("Stopped {}: {why}", job.label().to_lowercase()), t);
                             self.react(Anim::Sad, 1.2, t);
                         }
                         None => self.say_me("Break time! I keep what I earned.", t),
@@ -903,6 +928,7 @@ impl App {
                     self.burst(a, Fx::Star, 14, 150.0);
                     self.react(Anim::Happy, 1.6, t);
                     self.say_me("I feel stronger!", t);
+                    self.news(format!("Reached level {l}"), t);
                     self.m.flash = 1.0;
                     self.hop();
                 }
@@ -912,10 +938,13 @@ impl App {
                     self.burst(a, Fx::Spark(GOLD), 8, 90.0);
                     self.react(Anim::Happy, 1.2, t);
                     self.say_me(if job == Job::Sleep { "Good morning!" } else { "Done! That was fun." }, t);
+                    self.news(format!("Finished {}", job.label().to_lowercase()), t);
                 }
                 Event::Back(rep) => {
                     self.attention |= !self.open();
                     self.say_me(if rep.fled { "Ouch... I ran away." } else { "I'm back! Check my loot!" }, t);
+                    let zone = ZONES[rep.zone as usize].name;
+                    self.news(if rep.fled { format!("Fled from {zone}") } else { format!("Back from {zone} with {} loot", rep.loot.len()) }, t);
                     self.react(if rep.fled { Anim::Sad } else { Anim::Happy }, 2.0, t);
                     self.m.x = self.art.spot(Room::Portal, false).x + 30.0;
                     self.m.flip = true;
@@ -930,6 +959,7 @@ impl App {
                     self.m.flash = 1.0;
                     self.hop();
                     self.say_me(if stage == Stage::Elder { "I feel wise... and a bit creaky." } else { "Look how big I am!" }, t);
+                    self.news(format!("Grew into {}", stage.name().to_lowercase()), t);
                     if let (Some(p), false) = (&self.save.pet, self.open()) {
                         self.attention = true;
                         let an = if stage == Stage::Teen { "a" } else { "an" };
@@ -938,10 +968,12 @@ impl App {
                 }
                 Event::Sick => {
                     self.say_me("I don't feel so good...", t);
+                    self.news("Got sick", t);
                     self.react(Anim::Sad, 1.5, t);
                 }
                 Event::Healed => {
                     self.say_me("I feel better!", t);
+                    self.news("Feeling better", t);
                     self.react(Anim::Happy, 1.5, t);
                     self.burst(a, Fx::Heart, 6, 70.0);
                 }
@@ -1029,8 +1061,12 @@ impl App {
         let need = pet.need();
         if need != self.last_need {
             self.last_need = need;
-            if let (Some(n), false) = (need, self.open()) {
-                notify(format!("{} is {}", pet.name, n.label().to_lowercase()), format!("{}.", n.fix()));
+            if let Some(n) = need {
+                let (title, body) = (format!("{} is {}", pet.name, n.label().to_lowercase()), format!("{}.", n.fix()));
+                self.news(format!("{title}. {body}"), t);
+                if !self.open() {
+                    notify(title, body);
+                }
             }
         }
         match (self.view, need) {
@@ -1202,6 +1238,8 @@ impl App {
             f.over = true;
             let won = f.winner == f.me;
             let at = f.heads[f.winner];
+            let line = format!("{} {} · {}", if won { "Beat" } else { "Lost to" }, f.f[1 - f.me].name, f.reward);
+            self.news(line, t);
             self.float(at + vec2(0.0, -16.0), if won { "VICTORY!" } else { "DEFEAT" }, if won { GOLD } else { RED }, 26.0);
             if won {
                 self.confetti(at, 50);
@@ -1329,14 +1367,18 @@ impl App {
                         self.react(Anim::Eat, 1.4, t);
                         self.say_me(if it == Item::Medicine { "Yuck! ...but better." } else if info.slot == Slot::Food { "Nom nom!" } else { "Glug glug!" }, t);
                         let fx = info.fx;
+                        let mut line = format!("{} {}", if info.slot == Slot::Food { "Ate" } else { "Drank" }, info.name);
                         for (v, label, c) in [(fx.hunger, "Food", LEAF), (fx.thirst, "Water", AQUA), (fx.hp.min(999.0), "HP", RED), (fx.energy, "Energy", GOLD), (fx.mood, "Mood", PINK)] {
                             if v > 0.0 {
                                 self.float(a, format!("+{v:.0} {label}"), c, 15.0);
+                                line += &format!(" · +{v:.0} {label}");
                             }
                         }
+                        self.news(line, t);
                         self.burst(a + vec2(0.0, 30.0), Fx::Confetti(Color32::from_rgb(0xc8, 0x90, 0x4c)), 6, 60.0);
                     } else {
                         self.say_me(format!("{} equipped!", info.name), t);
+                        self.news(format!("Equipped {}", info.name), t);
                         self.burst(a, Fx::Spark(GOLD), 10, 100.0);
                         self.react(Anim::Happy, 1.0, t);
                         self.m.flash = 0.8;
@@ -1352,6 +1394,7 @@ impl App {
                     self.react(Anim::Eat, 1.2, t);
                     self.say_me("Glug glug!", t);
                     self.float(a, "+40 Water", AQUA, 15.0);
+                    self.news("Drank from the cooler · +40 Water", t);
                 }
             }
             Act::Buy(it) => match self.save.pet.as_mut().map(|p| p.buy(it)) {
@@ -1360,6 +1403,7 @@ impl App {
                     self.float(a, format!("-{} gold", it.info().price), GOLD, 15.0);
                     self.burst(a, Fx::Coin, 8, 110.0);
                     self.say_me(format!("Ooh, {}!", it.info().name), t);
+                    self.news(format!("Bought {} for {} gold", it.info().name, it.info().price), t);
                     self.react(Anim::Happy, 0.8, t);
                 }
                 Some(Err(e)) => {
@@ -1373,6 +1417,7 @@ impl App {
                     self.dirty = true;
                     self.float(a, format!("+{g} gold"), GOLD, 15.0);
                     self.burst(a, Fx::Coin, 6, 100.0);
+                    self.news(format!("Sold {} for {g} gold", it.info().name), t);
                 }
             }
             Act::Unequip(slot) => {
@@ -1391,6 +1436,7 @@ impl App {
                 self.send(addr, &Msg::Challenge { battle, card: card.clone() });
                 self.pending = Some(Pending { battle, peer: id, card, until: t + 20.0 });
                 self.say_me(format!("Hey {name}, fight me!"), t);
+                self.news(format!("You challenged {name}"), t);
                 self.react(Anim::Attack, 0.6, t);
             }
             Act::Wave(id) => {
@@ -1402,17 +1448,19 @@ impl App {
                 let (addr, name) = (peer.addr, peer.card.name.clone());
                 self.send(addr, &Msg::Wave { from: pet.name.clone() });
                 self.say_me(format!("Hi {name}!"), t);
+                self.news(format!("You waved at {name}"), t);
                 self.react(Anim::Happy, 1.0, t);
                 self.hop();
             }
             Act::Gift(id, it) => {
-                let Some(addr) = self.peers.get(&id).map(|p| p.addr) else { return };
+                let Some((addr, name)) = self.peers.get(&id).map(|p| (p.addr, p.card.name.clone())) else { return };
                 let Some(pet) = &mut self.save.pet else { return };
                 if pet.take(it) {
                     let from = pet.name.clone();
                     self.send(addr, &Msg::Gift { from, item: it });
                     self.dirty = true;
                     self.say_me(format!("Sent a {}!", it.info().name), t);
+                    self.news(format!("You gave {name} a {}", it.info().name), t);
                     self.burst(a, Fx::Heart, 5, 70.0);
                 }
             }
@@ -1452,10 +1500,7 @@ impl App {
                 if let Some(n) = &self.net {
                     n.broadcast(&Msg::Chat { id: self.save.id, name: name.clone(), room: room as u8, text: text.clone() });
                 }
-                self.chat.push(ChatLine { room, name, text: text.clone(), mine: true });
-                if self.chat.len() > 100 {
-                    self.chat.remove(0);
-                }
+                self.log(ChatLine { room: Some(room), name: Some(name), text: text.clone(), mine: true, at: t });
                 let id = self.save.id;
                 self.say(id, text, t, 6.0);
             }

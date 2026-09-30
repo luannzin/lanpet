@@ -2,8 +2,8 @@
 name = "lanpet"
 # Bumping this and pushing to main publishes release v<version> (.github/workflows/release.yml),
 # which installed copies then update to.
-version = "0.1.5"
-edition = "2024"
+version = "0.1.6"
+edition = "2026"
 
 [dependencies]
 # No "wayland" feature on purpose: on Linux we run through X11/XWayland, which is what
