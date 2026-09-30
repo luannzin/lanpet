@@ -17,6 +17,12 @@ pub const ROAM: Vec2 = Vec2::new(120.0, 108.0);
 pub const ROAM_LOG: Vec2 = Vec2::new(220.0, 230.0);
 /// How long a new chat line or bit of news stays up over the desktop pet.
 const FRESH: f64 = 8.0;
+/// Hovering the desktop pet shows what was said or happened this recently...
+const RECENT: f64 = 3.0 * 60.0;
+/// ...once the pointer has rested on it this long (passing over it doesn't open the log)...
+const HOVER_INTENT: f64 = 0.35;
+/// ...and keeps it up this long after the pointer leaves, the last second fading out.
+const LINGER: f64 = 2.5;
 /// How long a needy pet stays in the tray after you close the window on it.
 const SNOOZE: f64 = 15.0 * 60.0;
 /// Where the popover opens when the tray can't say where its icon is: Windows' taskbar sits at the
@@ -116,6 +122,7 @@ impl App {
             self.roam.wander_at = t + 2.0;
             self.roam.held = false;
             self.roam.log = false; // `roam_step` opens it again if there's news
+            (self.roam.pointer, self.roam.hover_since) = (None, None);
             pos
         } else {
             // the popover opens beside the tray icon, or beside the desktop pet it was opened from
@@ -138,22 +145,41 @@ impl App {
         }
     }
 
-    /// Chat in our pet's room and its own news, newest first, for the desktop pet: the last few
-    /// while hovered, else only what arrived since the window closed, for a few seconds.
-    pub(crate) fn roam_lines(&self, t: f64) -> impl Iterator<Item = &ChatLine> {
+    /// Chat in our pet's room and its own news, newest first, with how visible each is over the
+    /// desktop pet: what arrived since the window closed pops up for a few seconds, and resting the
+    /// pointer on the pet brings back the recent lines until a moment after it leaves.
+    pub(crate) fn roam_lines(&self, t: f64) -> impl Iterator<Item = (&ChatLine, f32)> {
         let room = self.pet_room();
-        let all = self.m.hovered;
         self.chat
             .iter()
             .rev()
             .filter(move |l| l.room.is_none_or(|r| Some(r) == room))
-            .filter(move |l| all || (l.at >= self.hidden_at && t - l.at < FRESH))
+            .map(move |l| {
+                let age = t - l.at;
+                let fresh = if l.at >= self.hidden_at { FRESH - age } else { 0.0 };
+                let hover = if age < RECENT { self.roam.hover_until - t } else { 0.0 };
+                (l, fresh.max(hover).clamp(0.0, 1.0) as f32)
+            })
+            .filter(|&(_, a)| a > 0.0)
             .take(6)
     }
 
-    /// How faded a line over the desktop pet is: 1 until it has nearly timed out (or while hovered).
-    pub(crate) fn roam_fade(&self, l: &ChatLine, t: f64) -> f32 {
-        if self.m.hovered { 1.0 } else { (FRESH - (t - l.at)).clamp(0.0, 1.0) as f32 }
+    /// Where the pointer is and whether it's on the pet or its log (`hot`), all in screen points:
+    /// a pointer resting there opens the log and keeps it open, and the pet stops to be looked at.
+    /// `moved`: egui heard the pointer move this frame, so `at` is fresh.
+    pub(crate) fn roam_hover(&mut self, at: Option<Pos2>, moved: bool, hot: &[Rect], t: f64) {
+        // a still pointer keeps its screen spot while the window moves or grows around it
+        self.roam.pointer = match at {
+            None => None,
+            Some(p) if moved || self.roam.pointer.is_none() => Some(p),
+            Some(_) => self.roam.pointer,
+        };
+        self.m.hovered = self.roam.pointer.is_some_and(|p| hot.iter().any(|r| r.contains(p)));
+        if !self.m.hovered {
+            self.roam.hover_since = None;
+        } else if t - *self.roam.hover_since.get_or_insert(t) >= HOVER_INTENT {
+            self.roam.hover_until = t + LINGER;
+        }
     }
 
     /// The desktop pet: walks the window along the screen, idles, trains or sleeps where it
@@ -202,7 +228,7 @@ impl App {
         }
         self.roam.target_x = self.roam.target_x.clamp(min_x, max_x);
         let dx = self.roam.target_x - x;
-        self.m.moving = dx.abs() > 1.0 && t >= self.m.react_until && (job.is_none() || job == Some(Job::Run));
+        self.m.moving = dx.abs() > 1.0 && t >= self.m.react_until && !self.m.hovered && (job.is_none() || job == Some(Job::Run));
         if self.m.moving {
             let speed = if job == Some(Job::Run) { 160.0 } else { 50.0 };
             let before = roam_rect(self.roam.pos, self.roam.log).min.round();

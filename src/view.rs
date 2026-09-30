@@ -5,7 +5,7 @@ use crate::actions::{Btn, life_line};
 use crate::art::{Anim, Art, PetDraw, Room};
 use crate::game::{DAY, HitKind, Item, Job, Slot, Species, Stage, ZONES, now, xp_needed};
 use crate::look::*;
-use crate::window::{ROAM, ROAM_SCALE};
+use crate::window::{ROAM, ROAM_LOG, ROAM_SCALE};
 use crate::{Act, App, Fx, PX, Peer, Tab, View, game, job_anim, job_room};
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Key, Painter, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextEdit, TextFormat,
@@ -657,13 +657,15 @@ impl App {
     pub(crate) fn roam_view(&mut self, ui: &mut Ui, t: f64, acts: &mut Vec<Act>) {
         const SCALE: f32 = ROAM_SCALE;
         let win = ui.max_rect();
-        // the pet's own box sits at the bottom centre; above it, when grown, room for the log
-        let pet_box = Rect::from_center_size(pos2(win.center().x, win.max.y - ROAM.y / 2.0), ROAM);
+        // Window to screen. The pet is drawn where it stands on screen, not at the window's bottom
+        // centre: while the OS catches up with a move or a resize the pet stays put rather than jumping.
+        let to_screen = self.win_rect.min - win.min;
+        let pet_box = Rect::from_min_size(self.roam.pos.round() - to_screen, ROAM);
         self.scene_rect = pet_box;
         self.heads.clear();
         self.me_head = None;
         let painter = ui.painter_at(win);
-        let hit = Rect::from_min_max(pos2(win.center().x - 16.0 * SCALE, win.max.y - 34.0 * SCALE), pos2(win.center().x + 16.0 * SCALE, win.max.y));
+        let hit = Rect::from_min_max(pos2(pet_box.center().x - 16.0 * SCALE, pet_box.max.y - 34.0 * SCALE), pos2(pet_box.center().x + 16.0 * SCALE, pet_box.max.y));
         let resp = ui.interact(hit, ui.id().with("roam"), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
         if resp.drag_started_by(PointerButton::Primary) {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
@@ -673,7 +675,7 @@ impl App {
         if resp.clicked() {
             acts.push(Act::View(View::Popover));
         }
-        let feet = pos2(win.center().x, win.max.y - 6.0);
+        let feet = pos2(pet_box.center().x, pet_box.max.y - 6.0);
         let mut top = feet.y - 34.0 * SCALE; // lowest the log may reach: above the pet, or its bubble
         let away = self.save.pet.as_ref().and_then(|p| p.task).filter(|task| matches!(task.job, Job::Explore(_)));
         if let Some(task) = away {
@@ -693,7 +695,7 @@ impl App {
             self.heads.push((b.id, head, feet, b.anim));
             top = top.min(head.y);
             if let Some((text, until)) = self.said.get(&b.id) {
-                let bounds = Rect::from_min_max(pos2(win.min.x, pet_box.min.y), win.max);
+                let bounds = Rect::from_min_max(pos2(win.min.x, pet_box.min.y), pos2(win.max.x, pet_box.max.y));
                 top = bubble(&painter, head, text, bounds, ((until - t) as f32).min(0.25) / 0.25).min.y;
             }
         }
@@ -701,19 +703,18 @@ impl App {
 
         // the log, newest nearest the pet, as many lines as fit (only once the window has grown for it)
         let mut log = Rect::NOTHING;
-        if win.height() > ROAM.y + 1.0 {
+        if self.roam.log {
             let mut y = top - 8.0;
-            for l in self.roam_lines(t) {
-                let a = self.roam_fade(l, t);
+            for (l, a) in self.roam_lines(t) {
                 let mut job = LayoutJob::default();
-                job.wrap.max_width = win.width() - 20.0;
+                job.wrap.max_width = ROAM_LOG.x - 20.0;
                 if let Some(name) = &l.name {
                     job.append(name, 0.0, TextFormat::simple(FontId::new(12.5, heavy()), if l.mine { GREEN_LO } else { WOOD }.gamma_multiply(a)));
                 }
                 let (size, color) = if l.name.is_some() { (12.5, INK) } else { (12.0, INK_SOFT) };
                 job.append(&l.text, if l.name.is_some() { 5.0 } else { 0.0 }, TextFormat::simple(FontId::proportional(size), color.gamma_multiply(a)));
                 let g = painter.layout_job(job);
-                let r = Rect::from_center_size(pos2(win.center().x, y - g.size().y / 2.0 - 3.0), g.size() + vec2(12.0, 6.0));
+                let r = Rect::from_center_size(pos2(pet_box.center().x, y - g.size().y / 2.0 - 3.0), g.size() + vec2(12.0, 6.0));
                 if r.min.y < win.min.y + 2.0 {
                     break;
                 }
@@ -727,12 +728,12 @@ impl App {
         if log.is_positive() && ui.interact(log, ui.id().with("roam-log"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
             acts.extend([Act::View(View::Expanded), Act::Tab(Tab::Chat)]);
         }
-        // hovering the log keeps it open, so it can be read
-        let hovered = resp.hovered() || ui.rect_contains_pointer(log);
-        if resp.hovered() && !self.m.hovered {
+        let (local, moved) = ui.input(|i| (i.pointer.hover_pos(), i.events.iter().any(|e| matches!(e, egui::Event::PointerMoved(_)))));
+        let was = self.m.hovered;
+        self.roam_hover(local.map(|p| p + to_screen), moved, &[hit.translate(to_screen), log.translate(to_screen)], t);
+        if self.m.hovered && !was {
             self.m.sv -= 3.0;
         }
-        self.m.hovered = hovered;
     }
 
     /// ← → change room, Esc steps back (expanded → popover → closed). Ignored while typing.

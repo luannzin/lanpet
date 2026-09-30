@@ -177,6 +177,12 @@ struct Roam {
     still_at: f64,
     /// The window has grown upward to show the chat log above the pet.
     log: bool,
+    /// Pointer on screen while it's over the window. Screen, not window, coordinates: the window
+    /// moves and grows under a still pointer, and egui only hears where it is when it moves.
+    pointer: Option<Pos2>,
+    /// When the pointer came to rest on the pet or its log, and until when the log stays open for it.
+    hover_since: Option<f64>,
+    hover_until: f64,
 }
 
 struct Body {
@@ -423,7 +429,7 @@ impl App {
                 hovered: false,
             },
             // first time out it starts at the right edge (the position is clamped to the screen)
-            roam: Roam { pos: pos2(f32::MAX, 0.0), target_x: f32::MAX, wander_at: 0.0, held: false, still_at: 0.0, log: false },
+            roam: Roam { pos: pos2(f32::MAX, 0.0), target_x: f32::MAX, wander_at: 0.0, held: false, still_at: 0.0, log: false, pointer: None, hover_since: None, hover_until: 0.0 },
             fx: Vec::new(),
             floaters: Vec::new(),
             said: HashMap::new(),
