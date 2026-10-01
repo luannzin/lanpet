@@ -13,6 +13,7 @@ Grab the file for your OS from [Releases](https://github.com/luannzin/lanpet/rel
 |----|------|---------|
 | Ubuntu 22.04+ / Debian 12+ | `lanpet_amd64.deb` | Double-click it, or `sudo apt install ./lanpet_amd64.deb`. Then open LanPet from your apps |
 | macOS 11+ | `LanPet.dmg` | Open it and drag LanPet into Applications. First launch only: macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway** |
+| macOS 11+, portable | `LanPet-macos.zip` | Unzip it and run `LanPet.app` from anywhere (USB stick, Desktop…). Same one-time **Open Anyway** |
 | Windows 10+ | `LanPet-setup.exe` | Run it (no admin needed). First time only: **More info → Run anyway** |
 
 Those one-time warnings appear because the app isn't signed with a paid Apple/Microsoft certificate.
@@ -67,7 +68,7 @@ LANPET_SAVE=/tmp/pet2.json cargo run       # a second pet on the same machine, t
 cargo test
 python3 tools/gen_assets.py                # regenerate the pixel art in assets/ (needs Pillow)
 tools/build-deb.sh                         # Linux .deb
-tools/build-macos.sh                       # macOS .app + .dmg (on a Mac)
+tools/build-macos.sh                       # macOS .app + .dmg + portable .zip (on a Mac)
 tools/build-windows.sh                     # Windows installer (Git Bash + Inno Setup 6)
 ```
 

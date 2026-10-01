@@ -1,7 +1,7 @@
 name: release
 
 # Every push to main whose Cargo.toml version has no release yet builds the installers (Linux .deb,
-# Windows setup .exe, macOS .dmg) and publishes them as release v<version>; installed copies then
+# Windows setup .exe, macOS .dmg plus the portable .app zipped) and publishes them as release v<version>; installed copies then
 # update themselves to it. To ship: bump `version` in Cargo.toml and push.
 # "Run workflow" on the Actions tab builds the same files without publishing.
 on:
@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: tools/build-windows.sh
 
-      - name: macOS (universal .app in a .dmg)
+      - name: macOS (universal .app in a .dmg and a .zip)
         if: runner.os == 'macOS'
         run: tools/build-macos.sh
 
@@ -70,6 +70,7 @@ jobs:
             dist/*.deb
             dist/*.exe
             dist/*.dmg
+            dist/*.zip
           if-no-files-found: error
 
   release:
