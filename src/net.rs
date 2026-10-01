@@ -2,8 +2,8 @@
 //! whenever it sets off somewhere; challenges, waves and gifts go straight back to the sender's
 //! address. Battles are simulated locally on both sides from the same seed + stat snapshots.
 
-use crate::game::{Fighter, Item, Job, Species, Stage, ZONES, clean};
-use crate::world::Loc;
+use crate::game::{Fighter, Item, Job, Placed, Species, Stage, ZONES, clean};
+use crate::world::{Loc, sane_layout};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -11,8 +11,8 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 pub const PORT: u16 = 47474;
-/// LP3: the apartment block (the lobby and floors are places). Older pets are ignored.
-const MAGIC: &[u8] = b"LP3";
+/// LP4: furnished homes (cards carry a layout revision). Older pets are ignored.
+const MAGIC: &[u8] = b"LP4";
 
 /// A place position from the network: finite and roughly on the map (the app clamps it to the place).
 fn sane(p: [f32; 2]) -> [f32; 2] {
@@ -38,6 +38,8 @@ pub struct Card {
     /// Its feet in that place (pixels).
     pub pos: [f32; 2],
     pub job: Option<Job>,
+    /// Its home's layout revision: visitors fetch the layout again when it changes.
+    pub home_rev: u32,
 }
 
 impl Card {
@@ -68,6 +70,10 @@ pub enum Msg {
     Chat { id: u64, name: String, loc: Loc, text: String },
     /// Pet `id` set off from `from` to `to` in `loc`; everyone walks it there the same way.
     Move { id: u64, loc: Loc, from: [f32; 2], to: [f32; 2] },
+    /// Please send your home's layout (to see it from inside).
+    HomeReq,
+    /// `owner`'s home's furniture, at revision `rev`.
+    Home { owner: u64, rev: u32, placed: Vec<Placed> },
 }
 
 impl Msg {
@@ -84,6 +90,8 @@ impl Msg {
                 }
             }
             Msg::Move { from, to, .. } => (*from, *to) = (sane(*from), sane(*to)),
+            Msg::HomeReq => {}
+            Msg::Home { placed, .. } => sane_layout(placed),
         }
         Some(self)
     }
@@ -172,14 +180,15 @@ mod tests {
             loc: Some(Loc::Gym),
             pos: [40.0, 50.0],
             job: None,
+            home_rev: 1,
         }
     }
 
     #[test]
     fn rejects_junk_and_clamps_hostile_cards() {
         assert!(decode(b"hello").is_none());
-        assert!(decode(b"LP3{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
-        assert!(decode(b"LP3{\"t\":\"Chat\",\"id\":1,\"name\":\"x\",\"loc\":\"Moon\",\"text\":\"hi\"}").is_none());
+        assert!(decode(b"LP4{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
+        assert!(decode(b"LP4{\"t\":\"Chat\",\"id\":1,\"name\":\"x\",\"loc\":\"Moon\",\"text\":\"hi\"}").is_none());
         let mut c = card(1);
         c.fighter.str = i32::MAX;
         c.name = "a\u{7}very long name that goes on".into();
@@ -191,6 +200,10 @@ mod tests {
         let m = Msg::Move { id: 1, loc: Loc::Home(9), from: [1e9, 5.0], to: [3.0, 4.0] };
         let Some(Msg::Move { loc, from, .. }) = decode(&encode(&m)) else { panic!() };
         assert_eq!((loc, from), (Loc::Home(9), [4096.0, 5.0]));
+        // a home's layout: so many pieces at most, on the grid
+        let piece = Placed { f: crate::game::Furni::Sofa, x: -7, y: 99 };
+        let Some(Msg::Home { placed, .. }) = decode(&encode(&Msg::Home { owner: 1, rev: 2, placed: vec![piece; 500] })) else { panic!() };
+        assert_eq!((placed.len(), placed[0].x, placed[0].y), (crate::world::MAX_PIECES, 0, 31));
     }
 
     #[test]

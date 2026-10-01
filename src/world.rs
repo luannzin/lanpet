@@ -2,11 +2,132 @@
 //! in them, and getting around (paths over the walkable tiles, doors between places).
 //! Layouts come from `tools/gen_assets.py` through assets/meta.json.
 
+use crate::game::{Furni, Placed};
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 pub const TILE: f32 = 16.0;
+/// The most pieces a home holds (and a peer may send us).
+pub const MAX_PIECES: usize = 80;
+
+/// How a piece of furniture looks and sits (meta.json `furniture`).
+#[derive(Clone, Copy, Deserialize)]
+pub struct FurniArt {
+    pub sprite: usize,
+    /// Footprint in tiles.
+    pub size: [i32; 2],
+    pub low: bool,
+    /// Blocks walking (a rug doesn't).
+    pub solid: bool,
+    /// Where a pet stands to use it, from its feet.
+    pub stand: [f32; 2],
+}
+
+/// Every place, with the homes furnished from their owners' layouts.
+pub struct World {
+    places: Vec<Place>,
+    homes: HashMap<u64, Place>,
+    furni: HashMap<Furni, FurniArt>,
+    /// Prop sprite sizes, for clickable areas.
+    sizes: Vec<Vec2>,
+}
+
+impl World {
+    pub fn new(places: Vec<Place>, furni: HashMap<Furni, FurniArt>, sprites: &[[f32; 4]]) -> World {
+        assert!(Furni::ALL.iter().all(|f| furni.contains_key(f)), "regenerate assets: furniture changed");
+        World { places, homes: HashMap::new(), furni, sizes: sprites.iter().map(|s| vec2(s[2], s[3])).collect() }
+    }
+
+    pub fn place(&self, loc: Loc) -> &Place {
+        if let Loc::Home(owner) = loc
+            && let Some(home) = self.homes.get(&owner)
+        {
+            return home;
+        }
+        self.places.iter().find(|p| p.key == loc.key()).expect("every place is checked in Art::load")
+    }
+
+    pub fn art(&self, f: Furni) -> FurniArt {
+        self.furni[&f]
+    }
+
+    /// A home with nothing in it.
+    fn shell(&self) -> &Place {
+        self.places.iter().find(|p| p.key == "home").expect("every place is checked in Art::load")
+    }
+
+    /// The tiles a piece covers.
+    fn footprint(&self, p: Placed) -> impl Iterator<Item = (i32, i32)> {
+        let [w, h] = self.art(p.f).size;
+        (p.y..p.y + h).flat_map(move |y| (p.x..p.x + w).map(move |x| (x, y)))
+    }
+
+    /// An empty home with `pieces` in it: their props (in the same order), the floor they cover,
+    /// and a bed's spot to sleep in.
+    fn build(&self, pieces: &[Placed]) -> Place {
+        let mut home = self.shell().clone();
+        let mut beds = Vec::new();
+        for &p in pieces {
+            let a = self.art(p.f);
+            let feet = pos2((p.x as f32 + a.size[0] as f32 / 2.0) * TILE, (p.y + a.size[1]) as f32 * TILE);
+            let size = self.sizes[a.sprite];
+            let stand = feet + Vec2::from(a.stand);
+            if a.solid {
+                for (x, y) in self.footprint(p) {
+                    home.block(x, y);
+                }
+            }
+            if p.f == Furni::Bed {
+                beds.push([stand.x, stand.y]);
+            }
+            home.props.push(Prop {
+                sprite: a.sprite,
+                feet: [feet.x, feet.y],
+                low: a.low,
+                hot: Some([feet.x - size.x / 2.0, feet.y - size.y, size.x, size.y]),
+                act: p.f.act().map(String::from),
+                stand: Some([stand.x, stand.y]),
+            });
+        }
+        home.slots.insert("sleep".into(), beds);
+        home
+    }
+
+    /// Furnishes `owner`'s home as laid out.
+    pub fn furnish(&mut self, owner: u64, pieces: &[Placed]) {
+        let home = self.build(pieces);
+        self.homes.insert(owner, home);
+    }
+
+    /// Whether `new` can go into a home laid out as `pieces`: on the floor, clear of the doormat,
+    /// not on another solid piece, and leaving every bit of floor still reachable from the door.
+    pub fn fits(&self, pieces: &[Placed], new: Placed) -> bool {
+        let empty = self.shell();
+        let door = tile(empty.spawn());
+        if pieces.len() >= MAX_PIECES || !self.footprint(new).all(|(x, y)| empty.open(x, y) && (x, y) != door) {
+            return false;
+        }
+        if !self.art(new.f).solid {
+            return true;
+        }
+        let taken: Vec<(i32, i32)> = pieces.iter().filter(|p| self.art(p.f).solid).flat_map(|&p| self.footprint(p)).collect();
+        if self.footprint(new).any(|t| taken.contains(&t)) {
+            return false;
+        }
+        let mut after = pieces.to_vec();
+        after.push(new);
+        self.build(&after).all_reachable(empty.spawn())
+    }
+}
+
+/// Keeps a layout from the network sane: so many pieces at most, on the home's grid.
+pub fn sane_layout(pieces: &mut Vec<Placed>) {
+    pieces.truncate(MAX_PIECES);
+    for p in pieces.iter_mut() {
+        (p.x, p.y) = (p.x.clamp(0, 31), p.y.clamp(0, 31));
+    }
+}
 
 /// Where a pet is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -91,7 +212,7 @@ impl Loc {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Door {
     /// The door's tile: walking onto it at the end of a path goes through.
     pub at: [i32; 2],
@@ -107,7 +228,7 @@ impl Door {
 }
 
 /// Something standing in a place: a building, a tree, a bed.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Prop {
     pub sprite: usize,
     /// Bottom centre (place pixels); props sort with the pets by it.
@@ -127,7 +248,7 @@ impl Prop {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Place {
     pub key: String,
     /// In tiles.
@@ -168,6 +289,29 @@ impl Place {
     pub fn open_at(&self, p: Pos2) -> bool {
         let (x, y) = tile(p);
         self.open(x, y)
+    }
+
+    fn block(&mut self, x: i32, y: i32) {
+        if self.open(x, y) {
+            self.walk[y as usize].replace_range(x as usize..x as usize + 1, "#");
+        }
+    }
+
+    /// Every open tile can be walked to from `from`.
+    fn all_reachable(&self, from: Pos2) -> bool {
+        let open = self.walk.iter().map(|r| r.bytes().filter(|&b| b == b'.').count()).sum::<usize>();
+        let mut seen = vec![tile(from)];
+        let mut i = 0;
+        while i < seen.len() {
+            let (x, y) = seen[i];
+            i += 1;
+            for n in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                if self.open(n.0, n.1) && !seen.contains(&n) {
+                    seen.push(n);
+                }
+            }
+        }
+        seen.len() - usize::from(!self.open_at(from)) == open
     }
 
     pub fn door_at(&self, p: Pos2) -> Option<&Door> {
@@ -428,6 +572,33 @@ mod tests {
         assert_eq!(next_leg(Loc::Town, Loc::Shop, home), door("shop"));
         // nobody's home to go to once they've gone offline
         assert_eq!(next_leg(Loc::Lobby, Loc::Home(5), home), None);
+    }
+
+    #[test]
+    fn furniture_fits_on_open_floor_without_walling_anyone_in() {
+        let mut shell = place(&["#######", "#.....#", "#.....#", "#.....#", "#######"]);
+        shell.key = "home".into();
+        shell.spawn = [3.5 * TILE, 3.5 * TILE]; // the doormat, tile (3, 3)
+        let art = |size, solid| FurniArt { sprite: 0, size, low: false, solid, stand: [0.0, 8.0] };
+        let mut furni: HashMap<Furni, FurniArt> = Furni::ALL.iter().map(|&f| (f, art([1, 1], true))).collect();
+        furni.insert(Furni::Rug, art([2, 2], false));
+        furni.insert(Furni::Sofa, art([3, 1], true));
+        let world = World::new(vec![shell], furni, &[[0.0, 0.0, 16.0, 16.0]]);
+        let at = |f, x, y| Placed { f, x, y };
+        let plant = at(Furni::Plant, 2, 1);
+        assert!(world.fits(&[], plant));
+        assert!(!world.fits(&[], at(Furni::Plant, 0, 1)), "on the wall");
+        assert!(!world.fits(&[], at(Furni::Plant, 3, 3)), "on the doormat");
+        assert!(!world.fits(&[], at(Furni::Sofa, 4, 1)), "half off the floor");
+        assert!(!world.fits(&[plant], at(Furni::Cactus, 2, 1)), "on another piece");
+        assert!(world.fits(&[plant], at(Furni::Rug, 1, 1)), "a rug goes under things");
+        assert!(!world.fits(&[plant], at(Furni::Cactus, 1, 2)), "walls the corner tile in");
+        // a furnished home's floor is blocked where the solid pieces stand, and a bed is a place to sleep
+        let mut w = world;
+        w.furnish(9, &[plant, at(Furni::Bed, 4, 1), at(Furni::Rug, 1, 2)]);
+        let home = w.place(Loc::Home(9));
+        assert!(!home.open(2, 1) && home.open(1, 2) && home.props.len() == 3);
+        assert_eq!(home.slots("sleep"), &[[4.5 * TILE, 2.0 * TILE + 8.0]]);
     }
 
     #[test]

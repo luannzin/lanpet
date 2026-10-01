@@ -294,6 +294,130 @@ impl Item {
     }
 }
 
+// ------------------------------------------------------------------------------------------ furniture
+
+/// Things for your home. How each looks and how much floor it takes is in meta.json (FURNITURE in
+/// gen_assets.py); what it costs and does is here.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub enum Furni {
+    Bed,
+    Fridge,
+    Stove,
+    Cooler,
+    Rug,
+    Nightstand,
+    Sofa,
+    Table,
+    Plant,
+    Cactus,
+    Lamp,
+    Armchair,
+    Beanbag,
+    Bookshelf,
+    Desk,
+    Tv,
+    Aquarium,
+    Arcade,
+}
+
+impl Furni {
+    pub const ALL: [Furni; 18] = [
+        Furni::Bed, Furni::Fridge, Furni::Stove, Furni::Cooler, Furni::Rug, Furni::Nightstand, Furni::Sofa, Furni::Table, Furni::Plant,
+        Furni::Cactus, Furni::Lamp, Furni::Armchair, Furni::Beanbag, Furni::Bookshelf, Furni::Desk, Furni::Tv, Furni::Aquarium, Furni::Arcade,
+    ];
+
+    /// Name and shop price.
+    pub fn info(self) -> (&'static str, u32) {
+        match self {
+            Furni::Bed => ("Bed", 150),
+            Furni::Fridge => ("Fridge", 120),
+            Furni::Stove => ("Stove", 100),
+            Furni::Cooler => ("Water cooler", 60),
+            Furni::Rug => ("Rug", 50),
+            Furni::Nightstand => ("Nightstand", 35),
+            Furni::Sofa => ("Sofa", 120),
+            Furni::Table => ("Table", 60),
+            Furni::Plant => ("Plant", 25),
+            Furni::Cactus => ("Cactus", 20),
+            Furni::Lamp => ("Lamp", 40),
+            Furni::Armchair => ("Armchair", 80),
+            Furni::Beanbag => ("Beanbag", 45),
+            Furni::Bookshelf => ("Bookshelf", 90),
+            Furni::Desk => ("Desk", 70),
+            Furni::Tv => ("TV", 150),
+            Furni::Aquarium => ("Aquarium", 220),
+            Furni::Arcade => ("Arcade", 300),
+        }
+    }
+
+    /// What clicking it does at home (see `App::hot_act`).
+    pub fn act(self) -> Option<&'static str> {
+        match self {
+            Furni::Bed => Some("sleep"),
+            Furni::Fridge | Furni::Stove => Some("feed"),
+            Furni::Cooler => Some("drink"),
+            _ => None,
+        }
+    }
+}
+
+/// A piece standing in a home: its footprint's top-left tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Placed {
+    pub f: Furni,
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Your home's furniture: what's out, what's put away, and a number that goes up with every change
+/// (so visitors know to fetch it again).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    pub placed: Vec<Placed>,
+    pub stored: BTreeMap<Furni, u32>,
+    pub rev: u32,
+}
+
+impl Default for Layout {
+    /// How a new home comes furnished (tiles of the 14×10 home in gen_assets.py).
+    fn default() -> Layout {
+        let at = |f, x, y| Placed { f, x, y };
+        let placed = vec![
+            at(Furni::Rug, 5, 5),
+            at(Furni::Bed, 1, 2),
+            at(Furni::Nightstand, 3, 2),
+            at(Furni::Sofa, 5, 2),
+            at(Furni::Fridge, 9, 2),
+            at(Furni::Stove, 10, 2),
+            at(Furni::Cooler, 12, 2),
+            at(Furni::Table, 10, 6),
+            at(Furni::Plant, 1, 8),
+            at(Furni::Plant, 12, 8),
+        ];
+        Layout { placed, stored: BTreeMap::new(), rev: 1 }
+    }
+}
+
+impl Layout {
+    pub fn store(&mut self, f: Furni) {
+        *self.stored.entry(f).or_default() += 1;
+    }
+
+    /// Takes one `f` out of storage.
+    pub fn unstore(&mut self, f: Furni) -> bool {
+        match self.stored.get_mut(&f) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                if *n == 0 {
+                    self.stored.remove(&f);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------ jobs & zones
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1147,6 +1271,9 @@ pub struct Save {
     pub loc: Option<Loc>,
     #[serde(default)]
     pub spot: Option<[f32; 2]>,
+    /// Your home's furniture (yours, not the pet's: the next egg hatches into the same home).
+    #[serde(default)]
+    pub home: Layout,
 }
 
 impl Save {
@@ -1173,7 +1300,7 @@ impl Save {
     }
 
     pub fn load(path: &Path) -> Save {
-        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None, loc: None, spot: None };
+        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None, loc: None, spot: None, home: Layout::default() };
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 // Never silently overwrite a save we can't read.
@@ -1315,7 +1442,16 @@ mod tests {
 
     #[test]
     fn save_round_trips() {
-        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0), loc: Some(Loc::Gym), spot: Some([5.0, 6.0]) };
+        let s = Save {
+            id: 7,
+            pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)),
+            late: None,
+            out: true,
+            floor: Some(900.0),
+            loc: Some(Loc::Gym),
+            spot: Some([5.0, 6.0]),
+            home: Layout::default(),
+        };
         let back: Save = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(back.pet.as_ref().unwrap().bag.get(&Item::Apple), Some(&3));
         assert!(back.out && back.floor == Some(900.0) && back.loc == Some(Loc::Gym) && back.spot == Some([5.0, 6.0]));
@@ -1323,6 +1459,8 @@ mod tests {
         // from before the walkable world (a room number): the pet starts out in town
         let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0],"room":3}"#).unwrap();
         assert_eq!((old.id, old.loc, old.spot), (7, None, None));
+        // and homes from before furniture come furnished
+        assert_eq!(old.home, Layout::default());
         // pets from before life stages load as young adults
         let mut pet = serde_json::to_value(back.pet.unwrap()).unwrap();
         for k in ["age", "thirst", "sick", "strain", "care"] {

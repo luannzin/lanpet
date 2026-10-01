@@ -1414,14 +1414,19 @@ BUILDINGS = {"apartment": apartment, "library": library_b, "gym": gym_b, "shop":
 SPRITES, SPRITE_IDS = [], {}
 
 
+def sprite_id(name, fn, args=()):
+    """Index of sprite `name` in props.png, drawing it with fn(*args) the first time."""
+    if name not in SPRITE_IDS:
+        SPRITE_IDS[name] = len(SPRITES)
+        SPRITES.append(fn(*args))
+    return SPRITE_IDS[name]
+
+
 def put(pl, name, fn, tx, ty, fw=1, fh=1, act=None, stand=None, low=False, block=True, args=()):
     """Stand prop `name` (drawn by `fn`) on tiles tx..tx+fw, ty..ty+fh. `low` ones (beds, mats) go
     under every pet; the rest sort with the pets by their feet. Clicking a prop with an `act`
     walks the pet to `stand` (by default just in front of it) and then does it."""
-    if name not in SPRITE_IDS:
-        SPRITE_IDS[name] = len(SPRITES)
-        SPRITES.append(fn(*args))
-    i = SPRITE_IDS[name]
+    i = sprite_id(name, fn, args)
     img = SPRITES[i]
     feet = [(tx + fw / 2) * TILE, (ty + fh) * TILE]
     if block:
@@ -1642,23 +1647,105 @@ def build_floor():
 
 
 def build_home():
+    """An empty home: the game furnishes it from its owner's layout (Layout in game.rs)."""
     def decor(c, W, H):
         wall_window(c, 86, 5, 36, 20)
         picture(c, 150, 8, 18, 14, "#8ab4ff")
-        rug(c, 5 * TILE + 2, 5 * TILE + 4, 10 * TILE - 2, 8 * TILE - 4, "#5a8ae0", "#9ec4ff")
     pl = room("home", 14, 10, planks(T("#f2c690", "#deac74", "#c08e58")), wallpaper("#ffe6c8", "#ffd6b0"), decor,
-              glows=[(56, 36, 30, WARM, 0.25)], exit="floor")
-    put(pl, "bed", bed, 1, 2, 2, 3, act="sleep", low=True, stand=[32, 66])
-    put(pl, "nightstand", nightstand, 3, 2)
-    put(pl, "sofa", sofa, 5, 2, 3, 1)
-    put(pl, "fridge", fridge, 9, 2, act="feed")
-    put(pl, "stove", stove, 10, 2, 2, 1, act="feed")
-    put(pl, "cooler", cooler, 12, 2, act="drink")
-    put(pl, "table", table, 10, 6, 2, 1)
-    put(pl, "plant", plant, 1, 8)
-    put(pl, "plant", plant, 12, 8)
-    pl["slots"] = {"sleep": [[32, 66]], "egg": [[120, 104]]}
+              glows=[(104, 16, 36, WARM, 0.18)], exit="floor")
+    pl["slots"] = {"egg": [[120, 104]]}
     return pl
+
+
+def armchair():
+    c = Canvas(20, 26)
+    cloth = shades("#5a8ae0")
+    c.rect(2, 2, 18, 16, cloth)
+    c.rect(1, 10, 19, 24, cloth)
+    c.rect(4, 12, 16, 18, shades("#8ab4ff"))
+    return c.image()
+
+
+def beanbag():
+    c = Canvas(22, 18)
+    c.ellipse(11, 10, 9.5, 6.5, shades("#ffcc33"))
+    c.ellipse(11, 7, 5.5, 3, shades("#ffe08a"), edge=False)
+    return c.image()
+
+
+def tv():
+    c = Canvas(34, 30)
+    c.rect(2, 17, 32, 28, WOOD)
+    c.rect(4, 2, 30, 18, shades("#3f4454"))
+    c.rect(6, 4, 28, 16, T("#c8f0ff", "#5aa8e0", "#2c6fc0"), edge=False)
+    c.dots([(9, 6), (10, 6), (9, 7)], WHITE)
+    return c.image()
+
+
+def aquarium():
+    c = Canvas(34, 32)
+    c.rect(2, 18, 32, 30, DARKWOOD)
+    c.rect(2, 3, 32, 19, T("#c8f0ff", "#7cc8f0", "#4a96d0"))
+    c.rect(3, 16, 31, 18, SAND, edge=False)
+    c.poly([(7, 17), (8, 9), (10, 17)], shades("#5cb85a"), edge=False)
+    c.poly([(25, 17), (27, 7), (28, 17)], shades("#5cb85a"), edge=False)
+    for x, y in ((14, 8), (20, 12)):
+        c.ellipse(x, y, 2.5, 1.6, shades("#ff8a3a"), edge=False)
+    return c.image()
+
+
+def arcade():
+    c = Canvas(18, 38)
+    c.rect(2, 2, 16, 36, shades("#8e6ad8"))
+    c.rect(4, 7, 14, 17, T("#d0ffd8", "#3fd07a", "#2a9e5a"), edge=False)
+    c.rect(3, 19, 15, 24, shades("#3f4454"), edge=False)
+    c.dots([(6, 21), (10, 21), (12, 22)], rgb("#ff5a6e"))
+    return c.image()
+
+
+def cactus():
+    c = Canvas(14, 28)
+    c.rect(3, 20, 11, 26, shades("#e07a50"))
+    green = shades("#5cb85a")
+    c.ellipse(7, 12, 3, 9, green)
+    c.ellipse(3, 11, 1.6, 3.5, green)
+    c.ellipse(11, 9, 1.6, 3.5, green)
+    return c.image()
+
+
+def rug_prop():
+    c = Canvas(82, 50)
+    rug(c, 1, 1, 81, 49, "#5a8ae0", "#9ec4ff")
+    return c.image()
+
+
+# Furniture for homes (Furni in game.rs): sprite, its arguments, footprint in tiles, low (under the
+# pets), solid (blocks walking), and where a pet stands to use it, from its feet.
+FURNITURE = {
+    "Bed": ("bed", bed, (), 2, 3, True, True, [0, -14]),
+    "Fridge": ("fridge", fridge, (), 1, 1, False, True, [0, 8]),
+    "Stove": ("stove", stove, (), 2, 1, False, True, [0, 8]),
+    "Cooler": ("cooler", cooler, (), 1, 1, False, True, [0, 8]),
+    "Rug": ("rug", rug_prop, (), 5, 3, True, False, [0, 8]),
+    "Nightstand": ("nightstand", nightstand, (), 1, 1, False, True, [0, 8]),
+    "Sofa": ("sofa", sofa, (), 3, 1, False, True, [0, 8]),
+    "Table": ("table", table, (), 2, 1, False, True, [0, 8]),
+    "Plant": ("plant", plant, (), 1, 1, False, True, [0, 8]),
+    "Cactus": ("cactus", cactus, (), 1, 1, False, True, [0, 8]),
+    "Lamp": ("floor lamp", floor_lamp, (), 1, 1, False, True, [0, 8]),
+    "Armchair": ("armchair", armchair, (), 1, 1, False, True, [0, 8]),
+    "Beanbag": ("beanbag", beanbag, (), 1, 1, False, True, [0, 8]),
+    "Bookshelf": ("shelf0", books_shelf, (3,), 2, 1, False, True, [0, 8]),
+    "Desk": ("desk", desk, (), 2, 1, False, True, [0, 8]),
+    "Tv": ("tv", tv, (), 2, 1, False, True, [0, 8]),
+    "Aquarium": ("aquarium", aquarium, (), 2, 1, False, True, [0, 8]),
+    "Arcade": ("arcade", arcade, (), 1, 1, False, True, [0, 8]),
+}
+
+
+def furniture():
+    return {k: dict(sprite=sprite_id(name, fn, args), size=[w, h], low=low, solid=solid, stand=stand)
+            for k, (name, fn, args, w, h, low, solid, stand) in FURNITURE.items()}
 
 
 def build_library():
@@ -1854,6 +1941,7 @@ def main():
     items.save(os.path.join(ROOT, "items.png"))
     sheet([need_icon(rows, pal) for _, pal, rows in NEEDS], len(NEEDS), 10, 10).save(os.path.join(ROOT, "needs.png"))
     world = build_world()
+    meta["furniture"] = furniture()
     ground, rects = pack([p["ground"] for p in world], 960)
     ground.save(os.path.join(ROOT, "places.png"))
     # minimaps: each place with its props, shrunk to fit MINI

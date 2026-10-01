@@ -29,7 +29,7 @@ std::arch::global_asm!(
 
 use art::{Anim, Art, assign_slots};
 use eframe::egui::{self, Color32, Pos2, Rect, Ui, Vec2, pos2, vec2};
-use game::{BEAT, DAY, Event, Fighter, Hit, HitKind, Item, Job, Need, Report, Rng, Save, Slot, Species, Stage, ZONES, clean, now};
+use game::{BEAT, DAY, Event, Fighter, Furni, Hit, HitKind, Item, Job, Need, Report, Rng, Save, Slot, Species, Stage, ZONES, clean, now};
 use look::{AQUA, BLUE, DIM, GOLD, LEAF, PINK, RED, VIOLET};
 use net::{Card, Msg, Net};
 use std::collections::{BTreeMap, HashMap};
@@ -266,10 +266,28 @@ enum Act {
     Say(String),
     /// Install the downloaded new version and restart as it.
     Update,
+    /// Start or finish rearranging our home.
+    Decorate(bool),
+    /// Decorating: take a piece out of storage into hand.
+    Hold(Furni),
+    /// Decorating: set the piece in hand down with its top-left on this tile.
+    Place(i32, i32),
+    /// Decorating: pick up a placed piece (by index) to move it.
+    PickUp(usize),
+    /// Decorating: put the piece in hand back into storage.
+    PutAway,
+    BuyFurni(Furni),
 }
 
 struct App {
     art: Art,
+    world: world::World,
+    /// Decorating our home: Some(what's in hand, if anything).
+    deco: Option<Option<Furni>>,
+    /// Other homes' layouts: the revision we have of each, and when we last asked its owner for it
+    /// (they answer with `Msg::Home`).
+    have: HashMap<u64, u32>,
+    asked: HashMap<u64, f64>,
     save: Save,
     path: PathBuf,
     rng: Rng,
@@ -398,18 +416,24 @@ impl App {
         };
         let mut rng = Rng::seeded();
         let hatch_name = game::random_name(&mut rng);
-        let art = Art::load(&ctx);
-        // back where it was; a pet from before the walkable world starts out in town, an egg at home
+        let (art, mut world) = Art::load(&ctx);
+        world.furnish(save.id, &save.home.placed);
+        // back where it was (a visit ends at home); a pet from before the walkable world starts
+        // out in town, an egg at home
         let loc = match save.loc {
             Some(Loc::Home(_)) => Loc::Home(save.id),
             Some(l) => l,
             None if save.pet.is_some() => Loc::Town,
             None => Loc::Home(save.id),
         };
-        let place = art.place(loc);
+        let place = world.place(loc);
         let pos = save.spot.map_or(place.spawn(), |s| place.clamp(Pos2::from(s)));
         App {
             art,
+            world,
+            deco: None,
+            have: HashMap::new(),
+            asked: HashMap::new(),
             tray: Tray::start(&ctx),
             update: update::Updater::start(),
             clock: Instant::now(),
@@ -584,11 +608,11 @@ impl App {
     /// depend on who's online: a floor's doors open into its residents' homes, and a home's front
     /// door onto its floor (or the lobby, once its owner has gone offline).
     fn through(&self, d: &world::Door) -> Option<(Loc, Pos2)> {
-        let lift = |l: Loc| self.art.place(l).slots("lift").first().map_or(self.art.place(l).spawn(), |s| Pos2::from(*s));
+        let lift = |l: Loc| self.world.place(l).slots("lift").first().map_or(self.world.place(l).spawn(), |s| Pos2::from(*s));
         match (d.to.as_str(), self.loc) {
             ("floor", Loc::Home(owner)) => Some(match self.apartment(owner) {
                 Some((floor, door)) => {
-                    let place = self.art.place(Loc::Floor(floor));
+                    let place = self.world.place(Loc::Floor(floor));
                     (Loc::Floor(floor), place.slots("apt").get(door).map_or(place.spawn(), |s| Pos2::from(*s)))
                 }
                 None => (Loc::Lobby, lift(Loc::Lobby)),
@@ -604,7 +628,7 @@ impl App {
     /// Where the pets working here stand: each job's spots (desks, treadmills...) shared out the
     /// same way on every LAN client.
     fn job_spots(&self, loc: Loc) -> Vec<(u64, Pos2)> {
-        let place = self.art.place(loc);
+        let place = self.world.place(loc);
         let mut out = Vec::new();
         for key in ["study", "lift", "run", "sleep"] {
             let mut pets: Vec<(u64, Option<usize>)> = self.peers_in(loc).filter(|p| p.card.job.map(job_key) == Some(key)).map(|p| (p.card.id, None)).collect();
@@ -667,7 +691,7 @@ impl App {
 
     /// Everyone to draw in `loc`, feet in place pixels.
     fn bodies(&self, loc: Loc, t: f64) -> Vec<Body> {
-        let place = self.art.place(loc);
+        let place = self.world.place(loc);
         let spot = |key: &str, i: usize| place.slots(key).get(i).map_or(place.spawn(), |s| Pos2::from(*s));
         let mut v = Vec::new();
         if let (Some(f), Loc::Arena) = (&self.fight, loc) {
@@ -763,7 +787,7 @@ impl App {
 
     /// What the camera follows in `loc`: our pet, the egg, or the middle of a battle.
     fn focus(&self, loc: Loc) -> Pos2 {
-        let place = self.art.place(loc);
+        let place = self.world.place(loc);
         if self.fight.is_some() && loc == Loc::Arena {
             let s = place.slots("fight");
             if let [a, b, ..] = s {
@@ -792,6 +816,7 @@ impl App {
             loc: self.pet_loc(),
             pos: [self.m.pos.x, self.m.pos.y],
             job: p.task.map(|t| t.job),
+            home_rev: self.save.home.rev,
         })
     }
 
@@ -915,7 +940,7 @@ impl App {
                     return;
                 }
                 let view = self.view_loc();
-                let at = card.loc.map(|l| self.art.place(l).clamp(Pos2::from(card.pos)));
+                let at = card.loc.map(|l| self.world.place(l).clamp(Pos2::from(card.pos)));
                 let new = !self.peers.contains_key(&card.id);
                 let p = self.peers.entry(card.id).or_insert_with(|| Peer {
                     card: card.clone(),
@@ -930,7 +955,7 @@ impl App {
                     if new || p.card.loc != card.loc || p.pos.distance(at) > 4.0 * TILE {
                         (p.pos, p.path) = (at, Vec::new()); // just here, or far off: put it there
                     } else if p.path.is_empty() && p.pos.distance(at) > TILE {
-                        p.path = self.art.place(loc).path(p.pos, at).unwrap_or_default(); // drifted: walk it back
+                        p.path = self.world.place(loc).path(p.pos, at).unwrap_or_default(); // drifted: walk it back
                     }
                 }
                 let arrived = (new || p.card.loc != card.loc).then_some(card.loc).flatten();
@@ -943,7 +968,7 @@ impl App {
             }
             Msg::Move { id, loc, from, to } => {
                 let view = self.view_loc();
-                let place = self.art.place(loc);
+                let place = self.world.place(loc);
                 let Some(p) = self.peers.get_mut(&id) else { return }; // wait for its Hello
                 let (from, to) = (place.clamp(Pos2::from(from)), place.clamp(Pos2::from(to)));
                 let arrived = (p.card.loc != Some(loc)).then_some(loc);
@@ -1004,6 +1029,16 @@ impl App {
                     self.react(Anim::Happy, 1.5, t);
                     let a = self.anchor();
                     self.confetti(a, 24);
+                }
+            }
+            Msg::HomeReq => {
+                let home = &self.save.home;
+                self.send(from, &Msg::Home { owner: self.save.id, rev: home.rev, placed: home.placed.clone() });
+            }
+            Msg::Home { owner, rev, placed } => {
+                if owner != self.save.id && self.peers.contains_key(&owner) {
+                    self.world.furnish(owner, &placed);
+                    self.have.insert(owner, rev);
                 }
             }
             Msg::Chat { id, name, loc, text } => {
@@ -1199,6 +1234,15 @@ impl App {
             }
         }
         self.peers.retain(|_, p| t - p.seen < 8.0);
+        // inside someone's home: get its furniture, and again whenever they rearrange it
+        if let Loc::Home(owner) = self.view_loc()
+            && let Some(p) = self.peers.get(&owner)
+            && self.have.get(&owner) != Some(&p.card.home_rev)
+            && t - self.asked.get(&owner).copied().unwrap_or(-10.0) > 2.0
+        {
+            self.asked.insert(owner, t);
+            self.send(p.addr, &Msg::HomeReq);
+        }
         if self.pending.as_ref().is_some_and(|p| t > p.until) {
             self.pending = None;
             self.say_me("No answer...", t);
@@ -1272,7 +1316,7 @@ impl App {
                 self.save.pet = Some(pet);
                 // out of the egg, right where it lay
                 self.loc = Loc::Home(self.save.id);
-                let home = self.art.place(self.loc);
+                let home = self.world.place(self.loc);
                 self.m.pos = home.slots("egg").first().map_or(home.spawn(), |s| Pos2::from(*s));
                 let a = self.anchor();
                 self.confetti(a, 40);
@@ -1421,7 +1465,7 @@ impl App {
     /// Sets our pet off towards `to` in its place and tells the LAN. False when there's no way there.
     fn walk(&mut self, to: Pos2) -> bool {
         let Some(loc) = self.pet_loc() else { return false };
-        let Some(path) = self.art.place(loc).path(self.m.pos, to) else { return false };
+        let Some(path) = self.world.place(loc).path(self.m.pos, to) else { return false };
         let end = path.last().copied().unwrap_or(to);
         self.m.path = path;
         if let Some(n) = &self.net {
@@ -1434,7 +1478,7 @@ impl App {
     fn wander(&mut self) {
         for _ in 0..8 {
             let to = self.m.pos + vec2(self.rng.f32() - 0.5, self.rng.f32() - 0.5) * 8.0 * TILE;
-            let place = self.art.place(self.loc);
+            let place = self.world.place(self.loc);
             let open = place.open_at(to) && place.door_at(to).is_none();
             if open && self.walk(to) {
                 return;
@@ -1450,7 +1494,7 @@ impl App {
             return;
         }
         let residents = self.residents();
-        let place = self.art.place(self.loc);
+        let place = self.world.place(self.loc);
         let (to, then) = match world::next_leg(self.loc, goal, |o| world::apartment(&residents, o)) {
             Some(world::Leg::Door(key)) => (place.door_to(&key).map(|d| d.centre()), Vec::new()),
             Some(world::Leg::Ride(floor)) => (place.props.iter().find(|p| p.act.as_deref() == Some("elevator")).and_then(|p| p.stand).map(Pos2::from), vec![Act::Ride(floor)]),
@@ -1466,7 +1510,7 @@ impl App {
 
     /// The end of a walk: through the door it stopped on, or on with what the walk was for.
     fn arrived(&mut self, t: f64) {
-        let door = self.art.place(self.loc).door_at(self.m.pos).map(|d| self.through(d));
+        let door = self.world.place(self.loc).door_at(self.m.pos).map(|d| self.through(d));
         match door {
             Some(Some((to, at))) => self.enter(to, at, t),
             Some(None) => self.say_me("Nobody lives here yet.", t),
@@ -1474,8 +1518,25 @@ impl App {
         }
     }
 
+    /// Our home changed: rebuild it, save it, and let visitors know (the card's revision).
+    fn rearranged(&mut self) {
+        self.save.home.rev += 1;
+        self.world.furnish(self.save.id, &self.save.home.placed);
+        self.dirty = true;
+        self.last_hello = -10.0;
+    }
+
+    /// Done decorating; whatever's in hand goes back into storage.
+    fn stop_decorating(&mut self) {
+        if let Some(Some(f)) = self.deco.take() {
+            self.save.home.store(f);
+            self.dirty = true;
+        }
+    }
+
     /// Through a door: the screen cuts over to the place on the other side.
     fn enter(&mut self, loc: Loc, at: Pos2, t: f64) {
+        self.stop_decorating();
         self.loc = loc;
         self.m.pos = at;
         (self.m.path, self.m.then) = (Vec::new(), Vec::new());
@@ -1565,7 +1626,7 @@ impl App {
             Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.fight.is_some() || self.pet_loc().is_none() => {}
             Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.job().is_some() => self.say_me("I'm busy! Press Stop first.", t),
             Act::Ride(to) => {
-                let place = self.art.place(to);
+                let place = self.world.place(to);
                 let at = place.slots("lift").first().map_or(place.spawn(), |s| Pos2::from(*s));
                 self.enter(to, at, t);
             }
@@ -1753,6 +1814,69 @@ impl App {
             Act::Update => {
                 self.update.install();
                 self.say_me("Updating... see you in a sec!", t);
+            }
+            Act::Decorate(true) => {
+                if self.view_loc() == Loc::Home(self.save.id) && self.deco.is_none() {
+                    self.deco = Some(None);
+                    self.say_me("Let's redecorate!", t);
+                }
+            }
+            Act::Decorate(false) => self.stop_decorating(),
+            Act::Hold(f) => {
+                if let Some(hand) = &mut self.deco
+                    && self.save.home.unstore(f)
+                {
+                    if let Some(old) = hand.replace(f) {
+                        self.save.home.store(old);
+                    }
+                    self.dirty = true;
+                }
+            }
+            Act::Place(x, y) => {
+                let Some(Some(f)) = self.deco else { return };
+                let piece = game::Placed { f, x, y };
+                if !self.world.fits(&self.save.home.placed, piece) {
+                    self.say_me("It won't fit there.", t);
+                    return;
+                }
+                // flat things go under everything else
+                if self.world.art(f).solid { self.save.home.placed.push(piece) } else { self.save.home.placed.insert(0, piece) }
+                self.deco = Some(None);
+                self.rearranged();
+            }
+            Act::PickUp(i) => {
+                let Some(hand) = self.deco else { return };
+                if i < self.save.home.placed.len() {
+                    let piece = self.save.home.placed.remove(i);
+                    if let Some(old) = hand {
+                        self.save.home.store(old);
+                    }
+                    self.deco = Some(Some(piece.f));
+                    self.rearranged();
+                }
+            }
+            Act::PutAway => {
+                if let Some(Some(f)) = self.deco {
+                    self.save.home.store(f);
+                    self.deco = Some(None);
+                    self.dirty = true;
+                }
+            }
+            Act::BuyFurni(f) => {
+                let (name, price) = f.info();
+                let Some(p) = &mut self.save.pet else { return };
+                if p.gold < price {
+                    self.say_me("Not enough gold!", t);
+                    self.react(Anim::Sad, 0.8, t);
+                    return;
+                }
+                p.gold -= price;
+                self.save.home.store(f);
+                self.dirty = true;
+                self.float(a, format!("-{price} gold"), GOLD, 15.0);
+                self.burst(a, Fx::Coin, 8, 110.0);
+                self.say_me(format!("A {}! It's waiting at home.", name.to_lowercase()), t);
+                self.news(format!("Bought a {name} for {price} gold. Decorate at home to put it out"), t);
             }
             Act::CloseReport => self.report = None,
             Act::CloseFight => {

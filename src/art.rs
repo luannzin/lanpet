@@ -1,7 +1,7 @@
 //! Pixel art made by `tools/gen_assets.py`, embedded in the binary and drawn with nearest filtering.
 
-use crate::game::{Item, Species, Stage};
-use crate::world::{Loc, Place};
+use crate::game::{Furni, Item, Species, Stage};
+use crate::world::{FurniArt, Loc, Place, World};
 use eframe::egui::{Color32, ColorImage, Context, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2, pos2, vec2};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -48,7 +48,9 @@ struct Meta {
     items: Vec<Item>,
     item_size: f32,
     need_size: f32,
+    /// The world's places and furniture: handed over to `World`.
     places: Vec<Place>,
+    furniture: HashMap<Furni, FurniArt>,
     /// Prop sprites in props.png: [x, y, w, h], drawn bottom-centre on their feet.
     sprites: Vec<[f32; 4]>,
 }
@@ -101,8 +103,9 @@ fn uv(tex: &TextureHandle, px: Rect) -> Rect {
 }
 
 impl Art {
-    pub fn load(ctx: &Context) -> Art {
-        let meta: Meta = serde_json::from_str(include_str!("../assets/meta.json")).expect("assets/meta.json matches art.rs");
+    /// The art, and the world laid out to go with it.
+    pub fn load(ctx: &Context) -> (Art, World) {
+        let mut meta: Meta = serde_json::from_str(include_str!("../assets/meta.json")).expect("assets/meta.json matches art.rs");
         assert!(meta.states.iter().map(|s| s.name.as_str()).eq(ANIM_NAMES), "regenerate assets: animation rows changed");
         assert!(meta.stages == Stage::ALL, "regenerate assets: life stages changed");
         for l in [Loc::Town, Loc::Library, Loc::Gym, Loc::Portal, Loc::Arena, Loc::Shop, Loc::Home(0), Loc::Lobby, Loc::Floor(1)] {
@@ -120,7 +123,8 @@ impl Art {
             .zip(sheets)
             .map(|(s, png)| (texture(ctx, s.key(), png, false), texture(ctx, s.key(), png, true)))
             .collect();
-        Art {
+        let world = World::new(std::mem::take(&mut meta.places), std::mem::take(&mut meta.furniture), &meta.sprites);
+        let art = Art {
             pets,
             hats: texture(ctx, "hats", include_bytes!("../assets/hats.png"), false),
             items: texture(ctx, "items", include_bytes!("../assets/items.png"), false),
@@ -130,7 +134,8 @@ impl Art {
             // already shrunk smoothly, and drawn at whatever size fits
             minimaps: load(ctx, "minimaps", include_bytes!("../assets/minimaps.png"), false, TextureOptions::LINEAR),
             meta,
-        }
+        };
+        (art, world)
     }
 
     pub fn frame(&self, anim: Anim, t: f64) -> usize {
@@ -193,10 +198,6 @@ impl Art {
         let s = self.meta.need_size;
         let src = Rect::from_min_size(pos2(i as f32 * s, 0.0), vec2(s, s));
         p.image(self.needs.id(), Rect::from_center_size(at, Vec2::splat(s * scale)), uv(&self.needs, src), Color32::WHITE);
-    }
-
-    pub fn place(&self, loc: Loc) -> &Place {
-        self.meta.places.iter().find(|p| p.key == loc.key()).expect("checked in Art::load")
     }
 
     /// Paints the part `src` (place pixels) of a place's ground into `rect`.

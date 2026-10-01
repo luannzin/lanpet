@@ -1,7 +1,7 @@
 //! What you can do right now: the popover's buttons, the expanded list, clickable furniture,
 //! and the one-line status under the place's name.
 
-use crate::game::{DAY, Item, Job, Need, Pet, Slot, Stage, ZONES, now};
+use crate::game::{DAY, Furni, Item, Job, Need, Pet, Slot, Stage, ZONES, now};
 use crate::world::{Door, Loc};
 use crate::{Act, App, Tab, View};
 
@@ -183,6 +183,19 @@ impl App {
     pub(crate) fn actions(&self, full: bool, t: f64) -> Vec<Btn> {
         let Some(pet) = &self.save.pet else { return Vec::new() };
         let mut v = Vec::new();
+        if let Some(hand) = self.deco {
+            v.push(Btn::new("Done", "Finish decorating", "Done", vec![Act::Decorate(false)]));
+            if let Some(f) = hand {
+                v.push(Btn::new(format!("Put away the {}", f.info().0.to_lowercase()), "Back into storage", "Store", vec![Act::PutAway]));
+            }
+            for (&f, &n) in &self.save.home.stored {
+                v.push(Btn::new(format!("{} ×{n}", f.info().0), "Pick it up, then click the floor", "Hold", vec![Act::Hold(f)]));
+            }
+            if hand.is_none() && self.save.home.stored.is_empty() {
+                v.push(Btn::new("Nothing put away", "Click furniture to move it · the Shop sells more", "…", vec![]).off_if(true));
+            }
+            return finish(v, full);
+        }
         if let Some(f) = &self.fight {
             if f.over {
                 v.push(Btn::new("Back", f.reward.clone(), "Back", vec![Act::CloseFight]));
@@ -304,6 +317,7 @@ impl App {
                 }
                 let n: u32 = pet.bag.values().sum();
                 v.push(Btn::new("Pet", format!("{} loves it · +Mood", pet.name), "Pet", vec![Act::PetIt]));
+                v.push(Btn::new("Decorate", "Move furniture, put it away or out", "Decorate", vec![Act::Decorate(true)]));
                 v.push(Btn::new("Bag", format!("{n} item{}", if n == 1 { "" } else { "s" }), "Open", vec![Act::View(View::Expanded), Act::Tab(Tab::Bag)]));
                 // what the pet needs most goes first
                 let urgent = |b: &Btn| {
@@ -367,6 +381,14 @@ impl App {
                     let price = it.info().price;
                     let sub = if matches!(it.info().slot, Slot::Food | Slot::Drink) { fx_text(it) } else { it.info().desc.into() };
                     v.push(Btn::new(it.info().name, sub, format!("{price} g"), vec![Act::Buy(it)]).item(it).off_if(pet.gold < price));
+                }
+                if full {
+                    for f in Furni::ALL {
+                        let (name, price) = f.info();
+                        v.push(Btn::new(name, "Furniture · goes into storage at home", format!("{price} g"), vec![Act::BuyFurni(f)]).off_if(pet.gold < price));
+                    }
+                } else {
+                    v.push(Btn::new("Furniture", "Beds, sofas, plants, an arcade…", "Browse", vec![Act::View(View::Expanded), Act::Tab(Tab::Here)]));
                 }
             }
             _ => {}

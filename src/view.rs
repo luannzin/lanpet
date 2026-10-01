@@ -3,7 +3,7 @@
 
 use crate::actions::{Btn, life_line};
 use crate::art::{Anim, Art, PetDraw};
-use crate::game::{DAY, HitKind, Job, Slot, Species, Stage, ZONES, now, xp_needed};
+use crate::game::{DAY, HitKind, Job, Placed, Slot, Species, Stage, ZONES, now, xp_needed};
 use crate::look::*;
 use crate::window::{ROAM, ROAM_LOG, ROAM_SCALE};
 use crate::world::{Loc, TILE};
@@ -34,7 +34,7 @@ impl App {
         let view = rect.size() / s;
         let focus = self.focus(loc);
         let bodies = self.bodies(loc, t);
-        let place = self.art.place(loc);
+        let place = self.world.place(loc);
         let size = place.px();
         // a place smaller than the view sits in its middle; a bigger one scrolls with the focus
         let axis = |full: f32, seen: f32, at: f32| if full <= seen { (full - seen) / 2.0 } else { (at - seen / 2.0).clamp(0.0, full - seen) };
@@ -118,7 +118,33 @@ impl App {
         let resp = ui.interact(rect, ui.id().with("scene"), Sense::click_and_drag());
         let hover = resp.hover_pos();
         let body = hover.filter(|&p| !on_mini(p)).and_then(|p| hits.iter().rev().find(|h| h.2.contains(p)).map(|h| (h.0, h.1)));
-        let playing = self.fight.is_none() && self.save.pet.is_some();
+        let decorating = self.deco.filter(|_| loc == Loc::Home(self.save.id));
+        let playing = self.fight.is_none() && self.save.pet.is_some() && decorating.is_none();
+        // decorating: the piece in hand follows the pointer, snapped to the floor, green where it
+        // fits; with empty hands, furniture under the pointer can be picked up
+        let mut deco: Option<(Rect, String, Act)> = None;
+        if let (Some(hand), Some(p)) = (decorating, hover.filter(|&p| body.is_none() && !on_mini(p))) {
+            let wp = from(p);
+            match hand {
+                Some(f) => {
+                    let a = self.world.art(f);
+                    let piece = Placed { f, x: (wp.x / TILE).floor() as i32 - (a.size[0] - 1) / 2, y: (wp.y / TILE).floor() as i32 - (a.size[1] - 1) };
+                    let fits = self.world.fits(&self.save.home.placed, piece);
+                    let foot = Rect::from_min_size(pos2(piece.x as f32 * TILE, piece.y as f32 * TILE), vec2(a.size[0] as f32, a.size[1] as f32) * TILE);
+                    painter.rect_filled(Rect::from_min_max(to(foot.min), to(foot.max)), 0.0, if fits { GREEN } else { RED }.gamma_multiply(0.35));
+                    let tint = if fits { Color32::from_rgba_unmultiplied(255, 255, 255, 215) } else { Color32::from_rgba_unmultiplied(255, 130, 130, 150) };
+                    self.art.prop(&painter, a.sprite, to(pos2(foot.center().x, foot.max.y)), s, tint);
+                    deco = fits.then(|| (Rect::NOTHING, String::new(), Act::Place(piece.x, piece.y)));
+                }
+                None => {
+                    let under = place.props.iter().enumerate().filter(|(_, q)| q.hot_rect().is_some_and(|r| r.contains(wp))).max_by(|a, b| a.1.feet[1].total_cmp(&b.1.feet[1]));
+                    if let (Some((i, q)), Some(piece)) = (under, under.and_then(|(i, _)| self.save.home.placed.get(i))) {
+                        let r = q.hot_rect().unwrap_or(Rect::NOTHING);
+                        deco = Some((Rect::from_min_max(to(r.min), to(r.max)), format!("Move the {}", piece.f.info().0.to_lowercase()), Act::PickUp(i)));
+                    }
+                }
+            }
+        }
         let hot = match (hover, body) {
             (Some(p), None) if playing && !on_mini(p) => {
                 let wp = from(p);
@@ -136,15 +162,8 @@ impl App {
             }
             _ => None,
         };
-        if let Some((r, label, ..)) = &hot {
-            painter.rect_stroke(*r, 0.0, Stroke::new(2.0, HOT), StrokeKind::Inside);
-            let g = painter.layout_no_wrap(label.clone(), FontId::new(12.0, heavy()), PARCH);
-            let above = r.min.y - g.size().y - 8.0 > rect.min.y;
-            let y = if above { r.min.y - 3.0 - (g.size().y + 4.0) } else { r.max.y + 3.0 };
-            let x = (r.center().x - g.size().x / 2.0 - 6.0).clamp(rect.min.x + 2.0, rect.max.x - g.size().x - 14.0);
-            let chip = Rect::from_min_size(pos2(x, y), g.size() + vec2(12.0, 4.0));
-            painter.rect_filled(chip, 0.0, WOOD_LO);
-            painter.galley(chip.min + vec2(6.0, 2.0), g, PARCH);
+        for (r, label) in hot.iter().map(|h| (h.0, &h.1)).chain(deco.iter().map(|d| (d.0, &d.1))).filter(|(r, _)| r.is_positive()) {
+            hover_chip(&painter, rect, r, label);
         }
         let mini_k = mini.map_or(1.0, |m| m.width() / size.x);
         let ground = hover
@@ -158,15 +177,16 @@ impl App {
             self.m.sv -= 3.0;
         }
         self.m.hovered = over_me;
-        if body.is_some() || hot.is_some() || hover.is_some_and(on_mini) {
+        if body.is_some() || hot.is_some() || deco.is_some() || hover.is_some_and(on_mini) {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
         if resp.clicked() {
-            match (body, hot, ground) {
+            match (body, hot, ground, deco) {
                 (Some((_, true)), ..) => acts.push(Act::PetIt),
                 (Some((id, false)), ..) if self.fight.is_none() && self.peers.contains_key(&id) => acts.push(Act::Select(Some(id))),
-                (None, Some((_, _, stand, then)), _) => acts.push(Act::Walk(stand, then)),
-                (None, None, Some(p)) => acts.extend([Act::Select(None), Act::Walk(p, Vec::new())]),
+                (None, _, _, Some((.., act))) => acts.push(act),
+                (None, Some((_, _, stand, then)), ..) => acts.push(Act::Walk(stand, then)),
+                (None, None, Some(p), _) => acts.extend([Act::Select(None), Act::Walk(p, Vec::new())]),
                 _ => acts.push(Act::Select(None)),
             }
         } else if resp.dragged()
@@ -190,6 +210,12 @@ impl App {
             painter.rect_stroke(m.expand(3.0), 0.0, Stroke::new(1.0, WOOD_HI), StrokeKind::Inside);
             self.art.minimap(&painter, place, m);
             let at = |p: Pos2| m.min + p.to_vec2() * mini_k;
+            if matches!(loc, Loc::Home(_)) {
+                // homes are furnished by their owners, so their minimap is too
+                for q in &place.props {
+                    self.art.prop(&painter, q.sprite, at(Pos2::from(q.feet)), mini_k, Color32::WHITE);
+                }
+            }
             painter.rect_stroke(Rect::from_min_size(at(cam.to_pos2()), view * mini_k).intersect(m), 0.0, Stroke::new(1.0, PARCH_LT), StrokeKind::Inside);
             for b in bodies.iter().filter(|b| !b.me) {
                 painter.circle(at(b.feet), 2.5, if self.selected == Some(b.id) { GOLD } else { PARCH_LT }, Stroke::new(1.0, INK));
@@ -765,15 +791,30 @@ impl App {
         }
     }
 
-    /// Esc steps back (expanded → popover → closed). Ignored while typing.
+    /// Esc steps back (decorating → expanded → popover → closed). Ignored while typing.
     pub(crate) fn keys(&self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        if self.save.pet.is_none() || !self.open() || ctx.egui_wants_keyboard_input() {
+        if self.save.pet.is_none() || !self.open() || ctx.egui_wants_keyboard_input() || !ctx.input(|i| i.key_pressed(Key::Escape)) {
             return;
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            acts.push(Act::View(if self.view == View::Expanded { View::Popover } else { View::Tray }));
-        }
+        acts.push(match (self.deco, self.view) {
+            (Some(Some(_)), _) => Act::PutAway,
+            (Some(None), _) => Act::Decorate(false),
+            (None, View::Expanded) => Act::View(View::Popover),
+            _ => Act::View(View::Tray),
+        });
     }
+}
+
+/// A highlight around `r` and a label chip above it (below, near the top of `scene`).
+fn hover_chip(p: &Painter, scene: Rect, r: Rect, label: &str) {
+    p.rect_stroke(r, 0.0, Stroke::new(2.0, HOT), StrokeKind::Inside);
+    let g = p.layout_no_wrap(label.to_string(), FontId::new(12.0, heavy()), PARCH);
+    let above = r.min.y - g.size().y - 8.0 > scene.min.y;
+    let y = if above { r.min.y - 3.0 - (g.size().y + 4.0) } else { r.max.y + 3.0 };
+    let x = (r.center().x - g.size().x / 2.0 - 6.0).clamp(scene.min.x + 2.0, scene.max.x - g.size().x - 14.0);
+    let chip = Rect::from_min_size(pos2(x, y), g.size() + vec2(12.0, 4.0));
+    p.rect_filled(chip, 0.0, WOOD_LO);
+    p.galley(chip.min + vec2(6.0, 2.0), g, PARCH);
 }
 
 /// Pets are drawn at 3/4 of the world's scale, in half-pixel steps, so they stand smaller than the

@@ -48,6 +48,9 @@ LAN play: be on the same Wi-Fi/network and click **Allow** on the first-run netw
   click the minimap to head somewhere further off.
 - Homes are in the apartment block: everyone online gets a front door, four to a floor. Take the
   elevator to a floor and walk in at a coworker's door to visit their home.
+- Decorate your home: at home, press **Decorate**, click a piece of furniture to pick it up and the
+  floor to set it down, or take more out of storage. The Shop sells furniture; visitors see your
+  home as you left it.
 - Click a coworker's pet to battle, wave or send a gift. Chat reaches the pets in the same place.
 - The expanded view can be made bigger by dragging its bottom-right corner.
 
