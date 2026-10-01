@@ -170,6 +170,18 @@ pub fn text1(p: &Painter, anchor: Pos2, align: Align2, text: &str, font: FontId,
     r
 }
 
+/// A game cursor around `r`: four pixel corner brackets with a dark drop.
+pub fn brackets(p: &Painter, r: Rect, color: Color32) {
+    let len = (r.width().min(r.height()) / 4.0).clamp(5.0, 12.0);
+    for (shift, c) in [(vec2(1.0, 1.0), WOOD_LO), (vec2(0.0, 0.0), color)] {
+        for (at, sx, sy) in [(r.left_top(), 1.0, 1.0), (r.right_top(), -1.0, 1.0), (r.left_bottom(), 1.0, -1.0), (r.right_bottom(), -1.0, -1.0)] {
+            let at = at + shift;
+            p.rect_filled(Rect::from_two_pos(at, at + vec2(sx * len, sy * 3.0)), 0.0, c);
+            p.rect_filled(Rect::from_two_pos(at, at + vec2(sx * 3.0, sy * len)), 0.0, c);
+        }
+    }
+}
+
 /// Four corner brackets; with `inward` a dot sits inside each, pointing the window smaller.
 pub fn expand_icon(p: &Painter, c: Pos2, inward: bool) {
     for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {

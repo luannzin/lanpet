@@ -29,13 +29,20 @@ impl App {
     /// to the thing clicked to use it (a door goes through).
     fn scene(&mut self, ui: &mut Ui, rect: Rect, loc: Loc, t: f64, acts: &mut Vec<Act>) {
         self.scene_rect = rect;
-        // whole screen pixels per place pixel: bigger windows get bigger pixels, and see more
-        let s = (rect.height() / 120.0).floor().max(2.0);
-        let view = rect.size() / s;
         let focus = self.focus(loc);
         let bodies = self.bodies(loc, t);
         let place = self.world.place(loc);
         let size = place.px();
+        // A room is shown whole when it can be (at 1.5× in the popover); the town scrolls, at whole
+        // screen pixels per place pixel that grow slowly with the window, so bigger shows more.
+        let fit = (rect.width() / size.x).min(rect.height() / size.y);
+        let s = match fit {
+            f if f >= 2.0 => f.floor().min(4.0),
+            f if f >= 1.5 => 1.5,
+            _ => (rect.height() / 200.0).floor().max(2.0),
+        };
+        let whole = fit >= 1.5;
+        let view = rect.size() / s;
         // a place smaller than the view sits in its middle; a bigger one scrolls with the focus
         let axis = |full: f32, seen: f32, at: f32| if full <= seen { (full - seen) / 2.0 } else { (at - seen / 2.0).clamp(0.0, full - seen) };
         let cam = vec2(axis(size.x, view.x, focus.x), axis(size.y, view.y, focus.y));
@@ -44,8 +51,8 @@ impl App {
         let to = |p: Pos2| origin + p.to_vec2() * s;
         let from = |p: Pos2| ((p - origin) / s).to_pos2();
         let ps = pet_scale(s);
-        // the minimap, top right, while there's a pet out and about
-        let mini = (self.save.pet.is_some() && self.fight.is_none()).then(|| {
+        // the minimap, top right, where the place is bigger than the view and there's a pet out and about
+        let mini = (!whole && self.save.pet.is_some() && self.fight.is_none()).then(|| {
             let [_, _, mw, mh] = place.mini;
             let k = (rect.width() * 0.26 / mw).min(rect.height() * 0.34 / mh).min(1.5);
             Rect::from_min_size(pos2(rect.max.x - mw * k - 7.0, rect.min.y + 7.0), vec2(mw, mh) * k)
@@ -326,14 +333,15 @@ impl App {
     fn column(&mut self, ui: &mut Ui, r: Rect, t: f64, acts: &mut Vec<Act>) {
         self.ribbon(ui, Rect::from_min_size(r.min, vec2(r.width(), 36.0)), acts);
         self.coin_row(ui, Rect::from_min_size(r.min + vec2(0.0, 42.0), vec2(r.width(), 24.0)), acts);
-        let scene = room_frame(ui.painter(), Rect::from_min_max(r.min + vec2(0.0, 72.0), pos2(r.max.x, r.max.y - 74.0)));
+        // the pet's state sits with its scene; the buttons stand a little apart
+        let scene = room_frame(ui.painter(), Rect::from_min_max(r.min + vec2(0.0, 72.0), pos2(r.max.x, r.max.y - 82.0)));
         let loc = self.view_loc();
         self.scene(ui, scene, loc, t, acts);
         if self.fight.is_some() {
             self.fight_overlay(ui.painter(), scene);
         }
         self.paint_fx(&ui.painter_at(scene));
-        self.vitals(ui, Rect::from_min_size(pos2(r.min.x, r.max.y - 68.0), vec2(r.width(), 16.0)), t);
+        self.vitals(ui, Rect::from_min_size(pos2(r.min.x, r.max.y - 76.0), vec2(r.width(), 16.0)), t);
         self.action_row(ui, Rect::from_min_size(pos2(r.min.x, r.max.y - 52.0), vec2(r.width(), 52.0)), t, acts);
     }
 
@@ -805,9 +813,9 @@ impl App {
     }
 }
 
-/// A highlight around `r` and a label chip above it (below, near the top of `scene`).
+/// A cursor around `r` and a label chip above it (below, near the top of `scene`).
 fn hover_chip(p: &Painter, scene: Rect, r: Rect, label: &str) {
-    p.rect_stroke(r, 0.0, Stroke::new(2.0, HOT), StrokeKind::Inside);
+    brackets(p, r, HOT);
     let g = p.layout_no_wrap(label.to_string(), FontId::new(12.0, heavy()), PARCH);
     let above = r.min.y - g.size().y - 8.0 > scene.min.y;
     let y = if above { r.min.y - 3.0 - (g.size().y + 4.0) } else { r.max.y + 3.0 };
@@ -823,12 +831,11 @@ fn pet_scale(s: f32) -> f32 {
     (s * 1.5).round() / 2.0
 }
 
-/// The scene's wood frame filling `r` (inset 3px at the sides); returns the scene's rect inside it.
+/// The scene's wood frame filling `r`; returns the scene's rect inside it.
 fn room_frame(p: &Painter, r: Rect) -> Rect {
-    let frame = r.shrink2(vec2(3.0, 0.0));
-    p.rect_filled(frame, 0.0, WOOD_HI);
-    p.rect_filled(frame.shrink(2.0), 0.0, WOOD_LO);
-    frame.shrink(5.0)
+    p.rect_filled(r, 0.0, WOOD_HI);
+    p.rect_filled(r.shrink(2.0), 0.0, WOOD_LO);
+    r.shrink(5.0)
 }
 
 /// A row in the expanded list: icon, label and detail, and a chip naming the action.

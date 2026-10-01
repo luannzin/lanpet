@@ -352,6 +352,8 @@ struct App {
     hidden_at: f64,
     had_focus: bool,
     dirty: bool,
+    /// `dev_shot`: when to take the screenshot.
+    shot_at: Option<f64>,
 }
 
 /// The place's spots a job uses (meta.json `slots`); expeditions happen elsewhere.
@@ -513,6 +515,7 @@ impl App {
             hidden_at: -10.0,
             had_focus: false,
             dirty: false,
+            shot_at: None,
         }
     }
 
@@ -1899,6 +1902,32 @@ impl App {
     }
 }
 
+impl App {
+    /// For checking layouts without a desktop: with `LANPET_SHOT=<file.png>` set, the window saves
+    /// a screenshot of itself 3 seconds in and quits (`LANPET_VIEW=expanded` opens the expanded view).
+    fn dev_shot(&mut self, ctx: &egui::Context, t: f64) {
+        let Some(path) = std::env::var_os("LANPET_SHOT") else { return };
+        if self.shot_at.is_none() {
+            self.shot_at = Some(t + 3.0);
+            if std::env::var("LANPET_VIEW").as_deref() == Ok("expanded") {
+                self.want_view = Some(View::Expanded);
+            }
+        }
+        if self.shot_at.is_some_and(|at| t > at) {
+            self.shot_at = Some(f64::MAX);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        let shot = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+        if let Some(img) = shot {
+            let [w, h] = img.size;
+            if let Err(e) = image::save_buffer(&path, img.as_raw(), w as u32, h as u32, image::ColorType::Rgba8) {
+                eprintln!("lanpet: screenshot failed: {e}");
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
@@ -1937,6 +1966,7 @@ impl eframe::App for App {
         for a in acts {
             self.apply(&ctx, a, t);
         }
+        self.dev_shot(&ctx, t);
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 

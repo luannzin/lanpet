@@ -6,7 +6,8 @@ use crate::tray::TrayMsg;
 use crate::{App, ChatLine, View};
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, WindowLevel, pos2, vec2};
 
-pub const POPOVER: Vec2 = Vec2::new(440.0, 426.0);
+/// Tall enough that a 160 px room fits its scene whole at 1.5× (see `scene`).
+pub const POPOVER: Vec2 = Vec2::new(440.0, 434.0);
 /// The expanded view opens this big and can be dragged bigger (down to EXPANDED_MIN).
 pub const EXPANDED: Vec2 = Vec2::new(900.0, 560.0);
 pub const EXPANDED_MIN: Vec2 = Vec2::new(740.0, 438.0);
