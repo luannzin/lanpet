@@ -2,11 +2,12 @@
 //! view (room cards, side panel), the desktop pet and the hatch screen.
 
 use crate::actions::{Btn, life_line};
-use crate::art::{Anim, Art, PetDraw, Room};
-use crate::game::{DAY, HitKind, Item, Job, Slot, Species, Stage, ZONES, now, xp_needed};
+use crate::art::{Anim, Art, PetDraw};
+use crate::game::{DAY, HitKind, Job, Slot, Species, Stage, ZONES, now, xp_needed};
 use crate::look::*;
 use crate::window::{ROAM, ROAM_LOG, ROAM_SCALE};
-use crate::{Act, App, Fx, PX, Peer, Tab, View, game, job_anim, job_room};
+use crate::world::{Loc, TILE};
+use crate::{Act, App, Fx, Tab, View, game};
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Key, Painter, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextEdit, TextFormat,
     Ui, UiBuilder, Vec2, ViewportCommand, pos2, text::LayoutJob, vec2,
@@ -14,48 +15,77 @@ use eframe::egui::{
 
 /// Frame outline + padding around the content.
 const PAD: f32 = 12.0;
-/// Main column (ribbon, room, vitals, actions), its height, and the expanded view's side panel.
+/// The hatch screen's column, and the expanded view's side panel.
 const COL: f32 = 416.0;
-const COL_H: f32 = 330.0;
 const SIDE: f32 = 290.0;
-const CARD_H: f32 = 76.0;
 /// Item frames by rarity: common, rare, epic, legendary.
 const RARITY: [Color32; 4] = [PARCH_LO, BLUE, Color32::from_rgb(0xb2, 0x7c, 0xff), GOLD];
-/// Room card thumbnails centre on each room's signature furniture (room pixels).
-const CARD_FOCUS: [f32; 8] = [150.0, 146.0, 160.0, 100.0, 150.0, 111.0, 100.0, 100.0];
 
 impl App {
     // -------------------------------------------------------------------------------------- the room
 
-    /// Draws a room with everyone in it, its clickable furniture, and speech bubbles.
-    fn scene(&mut self, ui: &mut Ui, rect: Rect, room: Room, t: f64, acts: &mut Vec<Act>) {
+    /// Draws a place around whatever the camera follows: its ground, props and everyone in it,
+    /// sorted by their feet, plus name tags and speech bubbles. Clicking walks our pet there, or up
+    /// to the thing clicked to use it (a door goes through).
+    fn scene(&mut self, ui: &mut Ui, rect: Rect, loc: Loc, t: f64, acts: &mut Vec<Act>) {
         self.scene_rect = rect;
-        let rs = self.art.room_size();
-        let mut bodies = self.bodies(room, t);
+        // whole screen pixels per place pixel: bigger windows get bigger pixels, and see more
+        let s = (rect.height() / 120.0).floor().max(2.0);
+        let view = rect.size() / s;
+        let focus = self.focus(loc);
+        let bodies = self.bodies(loc, t);
+        let place = self.art.place(loc);
+        let size = place.px();
+        // a place smaller than the view sits in its middle; a bigger one scrolls with the focus
+        let axis = |full: f32, seen: f32, at: f32| if full <= seen { (full - seen) / 2.0 } else { (at - seen / 2.0).clamp(0.0, full - seen) };
+        let cam = vec2(axis(size.x, view.x, focus.x), axis(size.y, view.y, focus.y));
         let shake = if self.shake > 0.3 { vec2(self.rng.f32() - 0.5, self.rng.f32() - 0.5) * self.shake } else { Vec2::ZERO };
-        let origin = rect.min + shake;
-        let to = |p: Pos2| origin + p.to_vec2() * PX;
+        let origin = (rect.min - cam * s).round() + shake;
+        let to = |p: Pos2| origin + p.to_vec2() * s;
+        let from = |p: Pos2| ((p - origin) / s).to_pos2();
+        let ps = pet_scale(s);
+        // the minimap, top right, while there's a pet out and about
+        let mini = (self.save.pet.is_some() && self.fight.is_none()).then(|| {
+            let [_, _, mw, mh] = place.mini;
+            let k = (rect.width() * 0.26 / mw).min(rect.height() * 0.34 / mh).min(1.5);
+            Rect::from_min_size(pos2(rect.max.x - mw * k - 7.0, rect.min.y + 7.0), vec2(mw, mh) * k)
+        });
+        let on_mini = |p: Pos2| mini.is_some_and(|m| m.expand(3.0).contains(p));
         let painter = ui.painter_at(rect);
-        self.art.room(&painter, room, Rect::from_min_size(origin, rs * PX), Rect::from_min_size(Pos2::ZERO, rs), Color32::WHITE);
+        let [r, g, b] = place.bg;
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(r, g, b));
+        self.art.ground(&painter, place, Rect::from_min_size(origin, size * s), Rect::from_min_size(Pos2::ZERO, size));
+        for q in place.props.iter().filter(|q| q.low) {
+            self.art.prop(&painter, q.sprite, to(Pos2::from(q.feet)), s, Color32::WHITE);
+        }
 
-        bodies.sort_by(|a, b| a.feet.y.total_cmp(&b.feet.y));
+        // props and pets in front-to-back order
+        let mut order: Vec<(f32, Option<usize>, usize)> = place.props.iter().enumerate().filter(|(_, q)| !q.low).map(|(i, q)| (q.feet[1], Some(i), 0)).collect();
+        order.extend(bodies.iter().enumerate().map(|(i, b)| (b.feet.y, None, i)));
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut hits = Vec::new();
         self.heads.clear();
         self.me_head = None;
-        for b in &bodies {
+        for (_, prop, i) in order {
+            if let Some(i) = prop {
+                let q = &place.props[i];
+                self.art.prop(&painter, q.sprite, to(Pos2::from(q.feet)), s, Color32::WHITE);
+                continue;
+            }
+            let b = &bodies[i];
             let feet = to(b.feet);
             if b.anim != Anim::Ghost {
-                let shadow = Rect::from_center_size(feet + vec2(0.0, -1.0), vec2(20.0 * PX * b.squash.x * b.stage.size(), 4.0 * PX));
+                let shadow = Rect::from_center_size(feet + vec2(0.0, -1.0), vec2(20.0 * ps * b.squash.x * b.stage.size(), 4.0 * ps));
                 painter.rect_filled(shadow, 8.0, Color32::from_black_alpha(70));
             }
             let head = self.art.draw_pet(
                 &painter,
-                &PetDraw { species: b.species, stage: b.stage, hat: b.hat, anim: b.anim, frame: b.frame, feet, scale: PX, squash: b.squash, flip: b.flip, flash: b.flash },
+                &PetDraw { species: b.species, stage: b.stage, hat: b.hat, anim: b.anim, frame: b.frame, feet, scale: ps, squash: b.squash, flip: b.flip, flash: b.flash },
             );
             if let Some(name) = &b.name {
                 let sel = self.selected == Some(b.id);
                 let g = painter.layout_no_wrap(name.clone(), FontId::new(11.0, heavy()), if sel { INK } else { PARCH });
-                let r = Rect::from_center_size(feet + vec2(0.0, 8.0), g.size() + vec2(10.0, 2.0));
+                let r = Rect::from_center_size(feet + vec2(0.0, 4.0 * s), g.size() + vec2(10.0, 2.0));
                 painter.rect_filled(r, 0.0, if sel { GOLD } else { WOOD_LO });
                 painter.galley(r.min + vec2(5.0, 1.0), g, INK);
             }
@@ -63,32 +93,41 @@ impl App {
                 self.me_head = Some(head);
             }
             if let Some(f) = &mut self.fight
-                && room == Room::Arena
+                && loc == Loc::Arena
             {
                 let i = if b.me { f.me } else { 1 - f.me };
                 f.heads[i] = head;
             }
             self.heads.push((b.id, head, feet, b.anim));
-            hits.push((b.id, b.me, Rect::from_min_max(pos2(feet.x - 13.0 * PX, feet.y - 27.0 * PX), pos2(feet.x + 13.0 * PX, feet.y))));
-        }
-        let fresh = std::mem::take(&mut self.fresh);
-        for id in fresh {
-            if let Some(&(_, _, feet, _)) = self.heads.iter().find(|h| h.0 == id) {
-                self.burst(feet + vec2(0.0, -20.0), Fx::Spark(MIST), 10, 90.0);
-            }
+            hits.push((b.id, b.me, Rect::from_min_max(pos2(feet.x - 13.0 * ps, feet.y - 27.0 * ps), pos2(feet.x + 13.0 * ps, feet.y))));
         }
 
-        let resp = ui.interact(rect, ui.id().with("scene"), Sense::click());
+        // under the pointer: a pet, else something that does something (the front-most prop), else a
+        // door; on the minimap, the spot it shows
+        let resp = ui.interact(rect, ui.id().with("scene"), Sense::click_and_drag());
         let hover = resp.hover_pos();
-        let body = hover.and_then(|p| hits.iter().rev().find(|h| h.2.contains(p)).map(|h| (h.0, h.1)));
-        let hot = match (hover, body, &self.fight, &self.save.pet) {
-            (Some(p), None, None, Some(_)) => self.art.hot(room).map(|(r, a)| (Rect::from_min_max(to(r.min), to(r.max)), a.to_string())).find(|(r, _)| r.contains(p)),
+        let body = hover.filter(|&p| !on_mini(p)).and_then(|p| hits.iter().rev().find(|h| h.2.contains(p)).map(|h| (h.0, h.1)));
+        let playing = self.fight.is_none() && self.save.pet.is_some();
+        let hot = match (hover, body) {
+            (Some(p), None) if playing && !on_mini(p) => {
+                let wp = from(p);
+                let prop = place.props.iter().filter_map(|q| Some((q, q.hot_rect().filter(|r| r.contains(wp))?, q.act.as_deref()?))).max_by(|a, b| a.0.feet[1].total_cmp(&b.0.feet[1]));
+                match prop {
+                    Some((q, r, act)) => {
+                        let (label, then) = self.hot_act(act);
+                        Some((Rect::from_min_max(to(r.min), to(r.max)), label, q.stand.map_or(Pos2::from(q.feet), Pos2::from), then))
+                    }
+                    None => place.door_at(wp).map(|d| {
+                        let tile = Rect::from_center_size(d.centre(), Vec2::splat(TILE));
+                        (Rect::from_min_max(to(tile.min), to(tile.max)), self.hot_act(&format!("go:{}", d.to)).0, d.centre(), Vec::new())
+                    }),
+                }
+            }
             _ => None,
         };
-        if let Some((r, act)) = &hot {
-            let (label, _) = self.hot_act(act);
+        if let Some((r, label, ..)) = &hot {
             painter.rect_stroke(*r, 0.0, Stroke::new(2.0, HOT), StrokeKind::Inside);
-            let g = painter.layout_no_wrap(label, FontId::new(12.0, heavy()), PARCH);
+            let g = painter.layout_no_wrap(label.clone(), FontId::new(12.0, heavy()), PARCH);
             let above = r.min.y - g.size().y - 8.0 > rect.min.y;
             let y = if above { r.min.y - 3.0 - (g.size().y + 4.0) } else { r.max.y + 3.0 };
             let x = (r.center().x - g.size().x / 2.0 - 6.0).clamp(rect.min.x + 2.0, rect.max.x - g.size().x - 14.0);
@@ -96,21 +135,35 @@ impl App {
             painter.rect_filled(chip, 0.0, WOOD_LO);
             painter.galley(chip.min + vec2(6.0, 2.0), g, PARCH);
         }
+        let mini_k = mini.map_or(1.0, |m| m.width() / size.x);
+        let ground = hover
+            .map(|p| match mini.filter(|_| on_mini(p)) {
+                Some(m) => ((p - m.min) / mini_k).to_pos2(),
+                None => from(p),
+            })
+            .filter(|&p| playing && place.open_at(p));
         let over_me = matches!(body, Some((_, true)));
         if over_me && !self.m.hovered {
             self.m.sv -= 3.0;
         }
         self.m.hovered = over_me;
-        if body.is_some() || hot.is_some() {
+        if body.is_some() || hot.is_some() || hover.is_some_and(on_mini) {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
         if resp.clicked() {
-            match (body, &hot) {
-                (Some((_, true)), _) => acts.push(Act::PetIt),
-                (Some((id, false)), _) if self.fight.is_none() && self.peers.contains_key(&id) => acts.push(Act::Select(Some(id))),
-                (None, Some((_, act))) => acts.extend(self.hot_act(act).1),
+            match (body, hot, ground) {
+                (Some((_, true)), ..) => acts.push(Act::PetIt),
+                (Some((id, false)), ..) if self.fight.is_none() && self.peers.contains_key(&id) => acts.push(Act::Select(Some(id))),
+                (None, Some((_, _, stand, then)), _) => acts.push(Act::Walk(stand, then)),
+                (None, None, Some(p)) => acts.extend([Act::Select(None), Act::Walk(p, Vec::new())]),
                 _ => acts.push(Act::Select(None)),
             }
+        } else if resp.dragged()
+            && let Some(p) = ground.filter(|_| t > self.m.steer_at && self.job().is_none())
+        {
+            // held down: the pet keeps following the pointer
+            self.m.steer_at = t + 0.15;
+            acts.push(Act::Walk(p, Vec::new()));
         }
 
         let heads: Vec<(u64, Pos2)> = self.heads.iter().map(|h| (h.0, h.1)).collect();
@@ -120,8 +173,28 @@ impl App {
                 bubble(&painter, head, text, rect, pop);
             }
         }
+        if let Some(m) = mini {
+            // the whole place, the part on screen, and everyone in it
+            painter.rect_filled(m.expand(3.0), 0.0, WOOD_LO);
+            painter.rect_stroke(m.expand(3.0), 0.0, Stroke::new(1.0, WOOD_HI), StrokeKind::Inside);
+            self.art.minimap(&painter, place, m);
+            let at = |p: Pos2| m.min + p.to_vec2() * mini_k;
+            painter.rect_stroke(Rect::from_min_size(at(cam.to_pos2()), view * mini_k).intersect(m), 0.0, Stroke::new(1.0, PARCH_LT), StrokeKind::Inside);
+            for b in bodies.iter().filter(|b| !b.me) {
+                painter.circle(at(b.feet), 2.5, if self.selected == Some(b.id) { GOLD } else { PARCH_LT }, Stroke::new(1.0, INK));
+            }
+            if let Some(b) = bodies.iter().find(|b| b.me) {
+                painter.circle(at(b.feet), 3.0, GREEN, Stroke::new(1.0, INK));
+            }
+        }
         if self.cut > 0.0 {
             painter.rect_filled(rect, 0.0, Color32::from_black_alpha(((self.cut * 1.6).min(1.0) * 255.0) as u8));
+        }
+        let fresh = std::mem::take(&mut self.fresh);
+        for id in fresh {
+            if let Some(&(_, _, feet, _)) = self.heads.iter().find(|h| h.0 == id) {
+                self.burst(feet + vec2(0.0, -20.0), Fx::Spark(MIST), 10, 90.0);
+            }
         }
     }
 
@@ -191,53 +264,49 @@ impl App {
     pub(crate) fn popover_view(&mut self, ui: &mut Ui, t: f64, acts: &mut Vec<Act>) {
         let win = ui.max_rect();
         window_frame(ui.painter(), win);
-        self.column(ui, win.min + vec2(PAD, PAD), t, acts);
+        self.column(ui, win.shrink(PAD), t, acts);
     }
 
+    /// The column with the side panel beside it, in a window you can drag bigger by its corner.
     pub(crate) fn expanded_view(&mut self, ui: &mut Ui, t: f64, acts: &mut Vec<Act>) {
         let win = ui.max_rect();
         window_frame(ui.painter(), win);
-        let top = win.min + vec2(PAD, PAD);
-        self.room_cards(ui, Rect::from_min_size(top, vec2(win.width() - 2.0 * PAD, CARD_H)), t, acts);
-        let y = top.y + CARD_H + 8.0;
-        self.column(ui, pos2(top.x, y), t, acts);
-        self.side(ui, Rect::from_min_size(pos2(top.x + COL + 10.0, y), vec2(SIDE, COL_H)), t, acts);
+        let inner = win.shrink(PAD);
+        let col = Rect::from_min_max(inner.min, pos2(inner.max.x - SIDE - 10.0, inner.max.y));
+        self.column(ui, col, t, acts);
+        self.side(ui, Rect::from_min_max(pos2(col.max.x + 10.0, inner.min.y), inner.max), t, acts);
+        let grip = Rect::from_min_max(win.max - vec2(PAD, PAD), win.max);
+        let resp = ui.interact(grip, ui.id().with("grip"), Sense::drag()).on_hover_cursor(CursorIcon::ResizeNwSe);
+        if resp.drag_started_by(PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(egui::viewport::ResizeDirection::SouthEast));
+        }
+        for d in [4.0, 8.0] {
+            ui.painter().line_segment([win.max - vec2(d, 3.0), win.max - vec2(3.0, d)], Stroke::new(1.5, PARCH_LO));
+        }
     }
 
-    /// Ribbon, coin row, the room, vitals and the action buttons: the whole popover, COL × COL_H.
-    fn column(&mut self, ui: &mut Ui, at: Pos2, t: f64, acts: &mut Vec<Act>) {
-        self.ribbon(ui, Rect::from_min_size(at, vec2(COL, 36.0)), acts);
-        self.coin_row(ui, Rect::from_min_size(at + vec2(0.0, 42.0), vec2(COL, 24.0)), acts);
-        let scene = room_frame(ui.painter(), at + vec2(0.0, 72.0));
-        let room = self.view_room();
-        self.scene(ui, scene, room, t, acts);
+    /// Ribbon, coin row, the place, vitals and the action buttons, filling `r`: the whole popover.
+    fn column(&mut self, ui: &mut Ui, r: Rect, t: f64, acts: &mut Vec<Act>) {
+        self.ribbon(ui, Rect::from_min_size(r.min, vec2(r.width(), 36.0)), acts);
+        self.coin_row(ui, Rect::from_min_size(r.min + vec2(0.0, 42.0), vec2(r.width(), 24.0)), acts);
+        let scene = room_frame(ui.painter(), Rect::from_min_max(r.min + vec2(0.0, 72.0), pos2(r.max.x, r.max.y - 74.0)));
+        let loc = self.view_loc();
+        self.scene(ui, scene, loc, t, acts);
         if self.fight.is_some() {
             self.fight_overlay(ui.painter(), scene);
         }
         self.paint_fx(&ui.painter_at(scene));
-        self.vitals(ui, Rect::from_min_size(at + vec2(0.0, 256.0), vec2(COL, 16.0)), t);
-        self.action_row(ui, Rect::from_min_size(at + vec2(0.0, 278.0), vec2(COL, 52.0)), t, acts);
+        self.vitals(ui, Rect::from_min_size(pos2(r.min.x, r.max.y - 68.0), vec2(r.width(), 16.0)), t);
+        self.action_row(ui, Rect::from_min_size(pos2(r.min.x, r.max.y - 52.0), vec2(r.width(), 52.0)), t, acts);
     }
 
     fn ribbon(&mut self, ui: &mut Ui, r: Rect, acts: &mut Vec<Act>) {
-        let i = self.room as usize;
-        let (prev, next) = (Room::ALL[(i + 7) % 8], Room::ALL[(i + 1) % 8]);
-        let can_go = self.fight.is_none();
-        for (dir, room, x) in [(-1.0, prev, r.min.x), (1.0, next, r.max.x - 36.0)] {
-            let br = Rect::from_min_size(pos2(x, r.min.y), vec2(36.0, 36.0));
-            let (resp, c) = button(ui, br, ui.id().with(("arrow", dir as i32)), Skin::Wood, can_go);
-            arrow(ui.painter(), c.center(), dir, if can_go { PARCH } else { PARCH.gamma_multiply(0.5) });
-            if resp.on_hover_text(format!("Go to the {}", room.name())).clicked() {
-                acts.push(Act::Go(room));
-            }
-        }
-        let title = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(r.max.x - 42.0, r.max.y));
-        self.title_plate(ui, title, acts);
+        self.title_plate(ui, r, acts);
         let p = ui.painter();
         let dy = -7.0 * self.kick * self.kick;
-        let w = title.width() - 16.0;
-        text1(p, pos2(title.center().x, title.min.y + 12.0 + dy), Align2::CENTER_CENTER, self.view_room().name(), FontId::new(18.0, heavy()), INK, w);
-        text1(p, pos2(title.center().x, title.min.y + 25.5 + dy * 0.4), Align2::CENTER_CENTER, &self.status_line(), FontId::proportional(12.0), INK_SOFT, w);
+        let w = r.width() - 16.0;
+        text1(p, pos2(r.center().x, r.min.y + 12.0 + dy), Align2::CENTER_CENTER, self.view_loc().name(), FontId::new(18.0, heavy()), INK, w);
+        text1(p, pos2(r.center().x, r.min.y + 25.5 + dy * 0.4), Align2::CENTER_CENTER, &self.status_line(), FontId::proportional(12.0), INK_SOFT, w);
     }
 
     /// The title plate doubles as the window's handle: drag to move, right-click for hide/quit.
@@ -321,7 +390,7 @@ impl App {
             let cell = Rect::from_min_size(pos2(r.min.x + i as f32 * (w + 8.0), r.min.y), vec2(w, r.height()));
             ui.interact(cell, ui.id().with(("vital", i)), Sense::hover()).on_hover_text(format!("{label} {real:.0} / {max:.0}"));
             let p = ui.painter();
-            self.art.need(p, i, pos2(cell.min.x + 10.0, cell.center().y), PX);
+            self.art.need(p, i, pos2(cell.min.x + 10.0, cell.center().y), 2.0);
             let bar = Rect::from_min_max(pos2(cell.min.x + 23.0, cell.min.y + 2.0), pos2(cell.max.x, cell.max.y - 2.0));
             p.rect_filled(bar, 0.0, WOOD_LO);
             let inner = bar.shrink(2.0);
@@ -360,62 +429,11 @@ impl App {
 
     // -------------------------------------------------------------------------------------- expanded extras
 
-    /// The expanded view's row of rooms: a live peek into each one, who's in it, and its name.
-    fn room_cards(&self, ui: &mut Ui, r: Rect, t: f64, acts: &mut Vec<Act>) {
-        let (cw, gap) = (84.0, 6.0);
-        let x0 = r.min.x + ((r.width() - (8.0 * cw + 7.0 * gap)) / 2.0).floor();
-        let here = self.pet_room();
-        let task = self.save.pet.as_ref().and_then(|p| p.task);
-        for (i, &room) in Room::ALL.iter().enumerate() {
-            let card = Rect::from_min_size(pos2(x0 + i as f32 * (cw + gap), r.min.y), vec2(cw, CARD_H));
-            let resp = ui.interact(card, ui.id().with(("room", i)), Sense::click());
-            let cur = room == self.view_room();
-            let p = ui.painter();
-            p.rect_filled(card, 0.0, if cur { GOLD } else if resp.hovered() { WOOD_HI } else { WOOD_LO });
-            let thumb = Rect::from_min_size(card.min + vec2(3.0, 3.0), vec2(cw - 6.0, 46.0));
-            let sx = (CARD_FOCUS[i] - thumb.width() / 2.0).clamp(0.0, 200.0 - thumb.width());
-            let tint = if cur || resp.hovered() { Color32::WHITE } else { Color32::from_gray(205) };
-            self.art.room(p, room, thumb, Rect::from_min_size(pos2(sx, 30.0), thumb.size()), tint);
-            // who's in there, drawn at 1x standing on the thumbnail's floor
-            let mut who: Vec<(Species, Stage, Option<Item>, Anim)> = Vec::new();
-            if here == Some(room)
-                && let Some(pet) = &self.save.pet
-            {
-                who.push((pet.species, pet.stage(), pet.hat, self.my_anim(t)));
-            }
-            let peers: Vec<&Peer> = self.peers_in(room).collect();
-            who.extend(peers.iter().take(2).map(|p| (p.card.species, p.card.stage, p.card.hat, p.card.job.map_or(Anim::Idle, job_anim))));
-            let n = who.len() as f32;
-            let tp = ui.painter_at(thumb);
-            for (k, (species, stage, hat, anim)) in who.into_iter().enumerate() {
-                let x = thumb.center().x + (k as f32 - (n - 1.0) / 2.0) * 22.0;
-                let frame = self.art.frame(anim, t + k as f64 * 0.4);
-                self.art.draw_pet(&tp, &PetDraw { species, stage, hat, anim, frame, feet: pos2(x, thumb.max.y - 1.0), scale: 1.0, squash: Vec2::splat(1.0), flip: k > 0, flash: 0.0 });
-            }
-            if !peers.is_empty() {
-                let chip = Rect::from_min_size(pos2(thumb.max.x - 17.0, thumb.min.y + 2.0), vec2(15.0, 15.0));
-                p.rect_filled(chip, 0.0, WOOD_LO);
-                p.rect_filled(chip.shrink(2.0), 0.0, GREEN);
-                p.text(chip.center(), Align2::CENTER_CENTER, peers.len().to_string(), FontId::new(10.5, heavy()), INK);
-            }
-            if let Some(task) = task.filter(|tk| job_room(tk.job) == room) {
-                let frac = 1.0 - task.end.saturating_sub(now()) as f32 / task.job.secs() as f32;
-                p.rect_filled(Rect::from_min_size(pos2(thumb.min.x, thumb.max.y - 3.0), vec2(thumb.width() * frac.clamp(0.0, 1.0), 3.0)), 0.0, GOLD);
-            }
-            let name = Rect::from_min_max(pos2(card.min.x + 3.0, thumb.max.y + 3.0), card.max - vec2(3.0, 3.0));
-            p.rect_filled(name, 0.0, if cur { PARCH } else { PARCH_LO });
-            text1(p, name.center(), Align2::CENTER_CENTER, room.name(), FontId::new(13.0, heavy()), INK, name.width() - 4.0);
-            if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                acts.push(Act::Go(room));
-            }
-        }
-    }
-
-    /// The expanded view's right panel: this room's full list, the bag, and room chat.
+    /// The expanded view's right panel: everything to do here, the bag, and the place's chat.
     fn side(&mut self, ui: &mut Ui, r: Rect, t: f64, acts: &mut Vec<Act>) {
         plate(ui.painter(), r, PARCH, PARCH_LO);
         let inner = r.shrink(3.0);
-        let tabs = [(Tab::Here, self.view_room().name()), (Tab::Bag, "Bag"), (Tab::Chat, "Chat")];
+        let tabs = [(Tab::Here, self.view_loc().name()), (Tab::Bag, "Bag"), (Tab::Chat, "Chat")];
         let tw = (inner.width() - 2.0 * 4.0 - 8.0) / 3.0;
         for (k, (tab, label)) in tabs.into_iter().enumerate() {
             let tr = Rect::from_min_size(inner.min + vec2(4.0 + k as f32 * (tw + 4.0), 4.0), vec2(tw, 28.0));
@@ -484,7 +502,7 @@ impl App {
             heading(ui, &c.name);
             ui.label(RichText::new(format!("Lv {} {} {} · {} · {}W / {}L", c.level, c.stage.name().to_lowercase(), c.species.name(), c.status, c.wins, c.losses)).color(INK_SOFT).size(12.5));
         }
-        if self.room == Room::Home && self.fight.is_none() && self.selected.is_none() {
+        if matches!(self.view_loc(), Loc::Home(_)) && self.fight.is_none() && self.selected.is_none() {
             let f = pet.fighter(true);
             heading(ui, &format!("{} · Lv {} {} {}", pet.name, pet.level, pet.stage().name().to_lowercase(), pet.species.name()));
             ui.label(RichText::new(format!("Str {} · Mana {} · Def {} · Spd {} · {}W / {}L", f.str, f.mag, f.def, f.spd, pet.wins, pet.losses)).color(INK_SOFT).size(12.5));
@@ -550,7 +568,7 @@ impl App {
     }
 
     fn chat_tab(&mut self, ui: &mut Ui, acts: &mut Vec<Act>) {
-        let room = self.view_room();
+        let room = self.view_loc();
         let who = match self.peers_in(room).count() {
             0 => "nobody else here yet".to_string(),
             1 => "1 other pet here".to_string(),
@@ -577,7 +595,7 @@ impl App {
                 });
             }
             if !any {
-                ui.label(RichText::new("Pets in this room see what you say here.").color(INK_SOFT).size(13.0));
+                ui.label(RichText::new("Pets here see what you say.").color(INK_SOFT).size(13.0));
             }
         });
         let area = ui.max_rect();
@@ -608,8 +626,8 @@ impl App {
         text1(ui.painter(), pos2(title.center().x, title.min.y + 12.0), Align2::CENTER_CENTER, &head, FontId::new(18.0, heavy()), INK, COL - 16.0);
         text1(ui.painter(), pos2(title.center().x, title.min.y + 25.5), Align2::CENTER_CENTER, &sub, FontId::proportional(12.0), INK_SOFT, COL - 16.0);
 
-        let scene = room_frame(ui.painter(), at + vec2(0.0, 42.0));
-        self.scene(ui, scene, Room::Home, t, acts);
+        let scene = room_frame(ui.painter(), Rect::from_min_size(at + vec2(0.0, 42.0), vec2(COL, 178.0)));
+        self.scene(ui, scene, Loc::Home(self.save.id), t, acts);
         self.paint_fx(&ui.painter_at(scene));
 
         let hatching = self.hatch_at.is_some();
@@ -736,29 +754,26 @@ impl App {
         }
     }
 
-    /// ← → change room, Esc steps back (expanded → popover → closed). Ignored while typing.
+    /// Esc steps back (expanded → popover → closed). Ignored while typing.
     pub(crate) fn keys(&self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         if self.save.pet.is_none() || !self.open() || ctx.egui_wants_keyboard_input() {
             return;
         }
-        let i = self.room as usize;
-        ctx.input(|inp| {
-            if self.fight.is_none() && inp.key_pressed(Key::ArrowLeft) {
-                acts.push(Act::Go(Room::ALL[(i + 7) % 8]));
-            }
-            if self.fight.is_none() && inp.key_pressed(Key::ArrowRight) {
-                acts.push(Act::Go(Room::ALL[(i + 1) % 8]));
-            }
-            if inp.key_pressed(Key::Escape) {
-                acts.push(Act::View(if self.view == View::Expanded { View::Popover } else { View::Tray }));
-            }
-        });
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            acts.push(Act::View(if self.view == View::Expanded { View::Popover } else { View::Tray }));
+        }
     }
 }
 
-/// The room's wood frame (410×178 at `at`, inset 3px in the column); returns the 400×168 room rect.
-fn room_frame(p: &Painter, at: Pos2) -> Rect {
-    let frame = Rect::from_min_size(at + vec2(3.0, 0.0), vec2(410.0, 178.0));
+/// Pets are drawn at 3/4 of the world's scale, in half-pixel steps, so they stand smaller than the
+/// doors and desks around them.
+fn pet_scale(s: f32) -> f32 {
+    (s * 1.5).round() / 2.0
+}
+
+/// The scene's wood frame filling `r` (inset 3px at the sides); returns the scene's rect inside it.
+fn room_frame(p: &Painter, r: Rect) -> Rect {
+    let frame = r.shrink2(vec2(3.0, 0.0));
     p.rect_filled(frame, 0.0, WOOD_HI);
     p.rect_filled(frame.shrink(2.0), 0.0, WOOD_LO);
     frame.shrink(5.0)

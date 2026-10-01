@@ -2,7 +2,8 @@
 """LanPet asset generator: procedural, shaded, auto-outlined pixel art.
 
 Writes assets/<species>.png (4 life stages x 15 animation rows x 4 frames of 32x32),
-assets/hats.png, assets/items.png, assets/needs.png, assets/rooms.png, assets/icon.png, assets/tray*.png
+assets/hats.png, assets/items.png, assets/needs.png, assets/places.png (the ground of the town and of every
+building's inside), assets/props.png (buildings, trees, furniture), assets/icon.png, assets/tray*.png
 and assets/meta.json.
 
     python3 tools/gen_assets.py [preview.png]
@@ -813,15 +814,27 @@ def need_icon(rows, pal):
     return c.image()
 
 
-# ----------------------------------------------------------------------------- rooms
-# Dark, neutral, minimal interiors. 200x84 each; the floor starts at FLOOR.
-RW, RH, FLOOR = 200, 84, 64
+# ----------------------------------------------------------------------------- world
+# Top-down places on a 16 px tile grid, seen a little from above (3/4 view): the town island you
+# walk around and the buildings you walk into. Each place's ground (grass, water, floors, walls) is
+# baked into places.png. Props (buildings, trees, furniture) are sprites in props.png that the game
+# sorts with the pets by their feet, so a pet can walk behind a tree or a bookshelf. meta.json gets
+# each place's walk mask, doors, props and job slots.
+TILE = 16
 BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
 T = tones
-WOOD = T("#5a4a44", "#4a3c37", "#382d2a")
-DARKWOOD = T("#4a3a34", "#3b2e2a", "#2c2220")
-METAL = T("#7a7f8e", "#5e6372", "#474b58")
+WOOD = T("#d9a46c", "#bb8650", "#92653a")
+DARKWOOD = T("#8a5c3e", "#6b4630", "#4f3324")
+METAL = T("#d4d9e2", "#a3aab8", "#747b8c")
+GLASS = T("#e6f8ff", "#9fd8f4", "#6aaed8")
+TRIM = rgb("#4a3328")
 WARM = "#ffcf8a"
+
+
+def shades(h):
+    """Highlight, base and shadow from one color."""
+    b = rgb(h)
+    return (mix(b, WHITE, 0.3), b, mix(b, INK, 0.3))
 
 
 def dq(t, x, y, steps):
@@ -829,30 +842,34 @@ def dq(t, x, y, steps):
     return max(0, min(steps, math.floor(t * steps + (BAYER[y % 4][x % 4] + 0.5) / 16))) / steps
 
 
-def base_room(wall=("#2d2b37", "#211f28"), floor=("#322e3b", "#25212c"), planks=True):
-    img = Image.new("RGBA", (RW, RH))
-    px = img.load()
-    w0, w1, f0, f1 = (rgb(c) for c in (*wall, *floor))
-    for y in range(RH):
-        for x in range(RW):
-            if y < FLOOR - 2:
-                px[x, y] = mix(w0, w1, dq(y / (FLOOR - 2), x, y, 4))
-            elif y < FLOOR:
-                px[x, y] = rgb("#46414f") if y == FLOOR - 2 else rgb("#3a3544")
-            else:
-                col = mix(f0, f1, dq((y - FLOOR) / (RH - FLOOR), x, y, 3))
-                band = (y - FLOOR) // 7
-                if planks and ((x + band * 23) % 38 == 0 or (y - FLOOR) % 7 == 6):
-                    col = mix(col, INK, 0.25)
-                px[x, y] = col
-    return img
+def hsh(x, y, seed=0):
+    """Deterministic 0..1 per (x, y)."""
+    n = (x * 374761393 + y * 668265263 + seed * 1442695041) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    return ((n ^ (n >> 16)) & 0xFFFF) / 65535
+
+
+def vnoise(x, y, cell, seed=0):
+    """Smooth value noise in -1..1, blobs about `cell` px across."""
+    gx, gy = x / cell, y / cell
+    i, j = math.floor(gx), math.floor(gy)
+    fx, fy = gx - i, gy - j
+    sx, sy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    a, b, c, d = (hsh(i + u, j + v, seed) for u, v in ((0, 0), (1, 0), (0, 1), (1, 1)))
+    top, bot = a + (b - a) * sx, c + (d - c) * sx
+    return (top + (bot - top) * sy) * 2 - 1
+
+
+def tone3(t, x, y, n):
+    """Highlight, base or shadow of `t`, dithered by n in -1..1."""
+    return t[min(2, int(dq(0.5 - n * 0.5, x, y, 2) * 2))]
 
 
 def glow(img, cx, cy, r, color, amt, sy=1.0):
     px = img.load()
     col = rgb(color)
-    for y in range(max(0, int(cy - r * sy)), min(RH, int(cy + r * sy) + 1)):
-        for x in range(max(0, int(cx - r)), min(RW, int(cx + r) + 1)):
+    for y in range(max(0, int(cy - r * sy)), min(img.height, int(cy + r * sy) + 1)):
+        for x in range(max(0, int(cx - r)), min(img.width, int(cx + r) + 1)):
             d = math.hypot(x + 0.5 - cx, (y + 0.5 - cy) / sy) / r
             if d < 1:
                 lvl = dq((1 - d) ** 1.6, x, y, 4) * amt
@@ -860,98 +877,9 @@ def glow(img, cx, cy, r, color, amt, sy=1.0):
                     px[x, y] = mix(px[x, y], col, lvl)
 
 
-def window(c, x, y, w, h):
-    frame = T("#4c4859", "#3d3a4b", "#2f2c3b")
-    c.rect(x, y, x + w, y + h, frame)
-    c.rect(x + 2, y + 2, x + w - 2, y + h - 2, (rgb("#2b3663"), rgb("#1e2649"), rgb("#161c37")), edge=False)
-    c.rect(x + w / 2 - 0.5, y + 2, x + w / 2 + 0.5, y + h - 2, frame, edge=False)
-    c.rect(x + 2, y + h / 2 - 0.5, x + w - 2, y + h / 2 + 0.5, frame, edge=False)
-    c.ellipse(x + w * 0.72, y + h * 0.28, 3, 3, rgb("#efe6c4"), edge=False)
-    c.ellipse(x + w * 0.72 + 1.3, y + h * 0.28 - 0.8, 2.4, 2.4, rgb("#1e2649"), edge=False)
-    c.dots([(x + 5, y + 5), (x + w * 0.3, y + h - 7), (x + w - 5, y + h - 5), (x + 8, y + h * 0.7)], rgb("#9aa6d0"))
-    c.rect(x - 2, y + h, x + w + 2, y + h + 2, frame)
-
-
-def room_home():
-    img, c = base_room(), Canvas(RW, RH)
-    c.ellipse(104, 75, 52, 5, T("#403a4c", "#3a3446", "#332e3e"), edge=False)
-    window(c, 18, 12, 40, 30)
-    sofa, cushion = T("#5a6075", "#474c5f", "#363a4a"), T("#6a7088", "#565c72", "#444a5c")
-    c.rect(124, 42, 188, 58, sofa)
-    c.rect(118, 54, 194, 66, sofa)
-    c.rect(116, 47, 125, 66, sofa)
-    c.rect(187, 47, 196, 66, sofa)
-    c.rect(128, 49, 156, 56, cushion)
-    c.rect(158, 49, 184, 56, cushion)
-    c.rect(99, 25, 100, 65, METAL)
-    c.rect(95, 64, 104, 66, METAL)
-    c.poly([(92, 26), (107, 26), (104, 16), (95, 16)], T("#ffe2b0", "#f0c888", "#c9a068"))
-    c.rect(68, 56, 78, 66, T("#6a5550", "#58463f", "#453631"))
-    leaf = T("#6f9a70", "#557d58", "#405f44")
-    for x, y, r in ((70, 50, 3.5), (76, 49, 3.5), (73, 45, 3.8), (67, 46, 2.8), (79, 44, 2.6)):
-        c.ellipse(x, y, r, r * 1.2, leaf)
-    img.alpha_composite(c.image())
-    glow(img, 99.5, 24, 36, WARM, 0.32)
-    glow(img, 38, 27, 26, "#7a9ae6", 0.14)
-    return img, dict(spot=[100, 74])
-
-
-def room_bedroom():
-    img, c = base_room(), Canvas(RW, RH)
-    window(c, 14, 10, 34, 28)
-    c.rect(130, 14, 158, 32, T("#4c4859", "#3d3a4b", "#2f2c3b"))
-    c.rect(132, 16, 156, 30, rgb("#2a2c3a"), edge=False)
-    c.poly([(133, 30), (140, 21), (146, 27), (150, 23), (156, 30)], rgb("#4a5470"), edge=False)
-    c.rect(182, 32, 192, 68, WOOD)
-    c.rect(104, 47, 110, 68, WOOD)
-    c.rect(108, 50, 184, 62, T("#6377a0", "#4d5f86", "#3c4a6a"))
-    c.rect(162, 50, 184, 54, T("#e0dbe8", "#c8c2d4", "#a49eb4"), edge=False)
-    c.ellipse(174, 48.5, 7, 3, T("#eeeaf4", "#d4cfe0", "#aca6bc"))
-    c.rect(108, 62, 184, 66, WOOD)
-    c.rect(82, 52, 98, 66, WOOD)
-    c.rect(84, 58, 96, 59, rgb("#2c2220"), edge=False)
-    c.rect(88, 46, 92, 52, METAL)
-    c.poly([(84, 46), (96, 46), (94, 39), (86, 39)], T("#ffe2b0", "#f0c888", "#c9a068"))
-    c.ellipse(60, 75, 30, 4.5, T("#3e3a50", "#383448", "#312d40"), edge=False)
-    img.alpha_composite(c.image())
-    glow(img, 90, 42, 32, WARM, 0.34)
-    glow(img, 31, 24, 24, "#7a9ae6", 0.14)
-    return img, dict(spot=[146, 51])
-
-
-def room_kitchen():
-    img, c = base_room(), Canvas(RW, RH)
-    cab = T("#4c4652", "#3e3944", "#302c36")
-    c.rect(6, 10, 76, 28, cab)
-    for x in (29, 52):
-        c.rect(x, 10, x + 1, 28, rgb("#2a2630"), edge=False)
-    c.dots([(26, 24), (32, 24), (49, 24), (55, 24)], rgb("#8a8494"))
-    c.rect(4, 45, 78, 66, cab)
-    c.rect(2, 42, 80, 46, T("#7a7682", "#65616e", "#524e5a"))
-    c.dots([(22, 52), (22, 53), (60, 52), (60, 53)], rgb("#8a8494"))
-    c.ellipse(24, 38.5, 5, 4, T("#9aa0b0", "#7c8292", "#5e6474"))
-    c.rect(22, 33, 26, 35, METAL)
-    c.rect(158, 14, 192, 66, T("#8e93a2", "#767b8b", "#5e6373"))
-    c.rect(158, 34, 192, 35, rgb("#4a4e5c"), edge=False)
-    c.rect(161, 22, 162, 30, rgb("#c8ccd6"), edge=False)
-    c.rect(161, 38, 162, 50, rgb("#c8ccd6"), edge=False)
-    # water cooler
-    c.rect(128, 45, 142, 66, T("#e8ecf4", "#cdd3df", "#a9b0c0"))
-    c.rect(130, 32, 140, 45, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
-    c.ellipse(135, 32, 5, 2.6, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
-    c.rect(131, 52, 139, 57, rgb("#8a90a0"), edge=False)
-    c.dots([(132, 49), (133, 49)], rgb("#5ac8f0"))
-    c.dots([(137, 49), (138, 49)], rgb("#e0483e"))
-    c.dots([(112, y) for y in range(0, 14)], rgb("#4a4658"))
-    c.poly([(103, 20), (121, 20), (116, 13), (108, 13)], T("#ffe2b0", "#f0c888", "#c9a068"))
-    img.alpha_composite(c.image())
-    glow(img, 112, 22, 40, WARM, 0.34)
-    return img, dict(spot=[112, 74])
-
-
 def bookshelf(c, rnd, x0, x1, y0=8, y1=66):
     c.rect(x0, y0, x1, y1, DARKWOOD)
-    books = ["#6b4f52", "#4f5f6e", "#5b6b52", "#6e6452", "#54526e", "#7a6a5c", "#4f6a66"]
+    books = ["#e85a6a", "#5a8ae0", "#5cb85a", "#f0b84a", "#8e6ad8", "#e88a4a", "#4ab8b0"]
     for sy in range(y0 + 3, y1 - 6, 13):
         c.rect(x0 + 2, sy, x1 - 2, sy + 10, rgb("#221a18"), edge=False)
         x = x0 + 3
@@ -962,151 +890,856 @@ def bookshelf(c, rnd, x0, x1, y0=8, y1=66):
             x += w + (2 if rnd.random() < 0.15 else 0)
 
 
-def room_library():
-    rnd = random.Random(3)
-    img, c = base_room(), Canvas(RW, RH)
-    bookshelf(c, rnd, 4, 62)
-    bookshelf(c, rnd, 138, 196)
-    c.rect(72, 49, 128, 53, WOOD)
-    c.rect(75, 53, 79, 66, WOOD)
-    c.rect(121, 53, 125, 66, WOOD)
-    c.rect(111, 42, 112, 49, METAL)
-    c.poly([(104, 42), (118, 42), (116, 38), (106, 38)], T("#7fb088", "#5a8a64", "#40664a"))
-    c.rect(80, 47, 96, 49, T("#e8e2d4", "#d4ccb8", "#b0a890"), edge=False)
-    c.ellipse(100, 75, 34, 4.5, T("#3a3446", "#343040", "#2e2a38"), edge=False)
-    img.alpha_composite(c.image())
-    glow(img, 111, 44, 30, "#e6f0a0", 0.28)
-    return img, dict(spot=[100, 74])
+GRASS = T("#a2e274", "#82cd5e", "#64b04d")
+SAND = T("#fff0c0", "#f4dc9c", "#e0c07a")
+COBBLE = T("#f0e2bc", "#dccaa0", "#bea67c")
+PLANK = T("#e0aa70", "#c48c56", "#9c6a3e")
 
 
-def room_gym():
-    img, c = base_room(floor=("#2c2b32", "#222127"), planks=False), Canvas(RW, RH)
-    c.rect(0, 28, 200, 31, T("#5a4048", "#4a353c", "#3a2a30"), edge=False)
-    plate, steel = T("#5a5f70", "#3f4454", "#2c303c"), METAL
-    c.rect(10, 50, 56, 52, steel)
-    c.rect(12, 52, 14, 66, steel)
-    c.rect(52, 52, 54, 66, steel)
-    c.rect(10, 58, 56, 60, steel)
-    for row in (44, 54):
-        for i in range(4):
-            x = 15 + i * 10
-            c.rect(x, row + 1, x + 2, row + 6, plate)
-            c.rect(x + 6, row + 1, x + 8, row + 6, plate)
-            c.rect(x + 2, row + 3, x + 6, row + 4, steel)
-    c.rect(64, 68, 132, 79, T("#4a4f60", "#3d4252", "#323644"))
-    c.rect(140, 62, 192, 68, T("#3a3a44", "#2c2c34", "#222228"))
-    c.rect(143, 60, 188, 62, rgb("#1c1c22"), edge=False)
-    c.rect(186, 36, 190, 62, steel)
-    c.rect(172, 40, 190, 42, steel)
-    c.poly([(179, 30), (197, 30), (195, 38), (181, 38)], steel)
-    c.rect(184, 32, 192, 35, rgb("#3fd07a"), edge=False)
-    for x in (40, 150):
-        c.rect(x, 6, x + 26, 8, T("#f0f2ff", "#d8dcf0", "#b0b4c8"))
-    img.alpha_composite(c.image())
-    glow(img, 53, 8, 40, "#dfe6ff", 0.18, sy=0.8)
-    glow(img, 163, 8, 40, "#dfe6ff", 0.18, sy=0.8)
-    glow(img, 188, 33, 12, "#3fd07a", 0.25)
-    return img, dict(spot=[98, 74], spot2=[163, 61])
+def grass(x, y):
+    c = tone3(GRASS, x, y, vnoise(x, y, 28, 1) * 0.8 + vnoise(x, y, 7, 2) * 0.45)
+    if hsh(x, y, 3) < 0.015:
+        return GRASS[0]
+    return GRASS[2] if hsh(x, y, 4) < 0.01 else c
 
 
-def room_portal():
-    img, c = base_room(wall=("#27243a", "#1c1a28")), Canvas(RW, RH)
-    c.rect(14, 14, 56, 40, T("#9a8a66", "#857658", "#6a5d45"))
-    c.dots([(20, 34), (23, 32), (26, 31), (29, 29), (33, 28), (36, 25), (40, 23), (44, 21)], rgb("#a0453c"))
-    c.dots([(47, 18), (49, 20), (49, 18), (47, 20), (48, 19)], rgb("#c03a3a"))
-    stone = T("#5c586c", "#4a4658", "#393647")
-    c.ring(112, 50, 30, 40, 6, stone, clip=lambda x, y: y < 65)
+def sand(x, y):
+    c = tone3(SAND, x, y, vnoise(x, y, 9, 6) * 0.7)
+    return SAND[2] if hsh(x, y, 7) < 0.02 else c
+
+
+def water(x, y, depth):
+    c = mix(rgb("#6fcaf0"), rgb("#2c6fc0"), dq(min(1.0, depth), x, y, 4))
+    if y % 6 == 0 and (x + int(4 * math.sin(y * 0.37))) % 23 < 4:  # wave crests
+        c = mix(c, WHITE, 0.4)
+    return c
+
+
+def cobble(x, y):
+    c = tone3(COBBLE, x, y, vnoise(x, y, 5, 5) * 0.9)
+    if y % 5 == 4 or (x + (y // 5 % 2) * 4) % 8 == 7:
+        c = mix(c, INK, 0.16)
+    return c
+
+
+def planks(t, across=True):
+    """Floorboards; `across` runs them left-right."""
+    def f(x, y):
+        a, b = (y, x) if across else (x, y)
+        row = a // 6
+        c = tone3(t, x, y, vnoise(b, a + row * 40, 24, 9) * 0.7)
+        if a % 6 == 5 or (b + row * 29) % 46 == 0:
+            c = mix(c, INK, 0.2)
+        return c
+    return f
+
+
+def checker(a, b):
+    a, b = rgb(a), rgb(b)
+
+    def f(x, y):
+        c = a if (x // 8 + y // 8) % 2 == 0 else b
+        return mix(c, INK, 0.12) if x % 8 == 7 or y % 8 == 7 else c
+    return f
+
+
+def mats(base):
+    b = rgb(base)
+
+    def f(x, y):
+        c = mix(b, WHITE, 0.08) if hsh(x, y, 13) < 0.06 else b
+        return mix(c, INK, 0.25) if x % 16 == 0 or y % 16 == 0 else c
+    return f
+
+
+def flagstones(t):
+    def f(x, y):
+        c = tone3(t, x, y, vnoise(x, y, 6, 14) * 0.8)
+        return mix(c, INK, 0.25) if y % 10 == 9 or (x + (y // 10 % 2) * 7) % 14 == 13 else c
+    return f
+
+
+def dirt(t):
+    def f(x, y):
+        return tone3(t, x, y, vnoise(x, y, 10, 15) * 0.7 + vnoise(x, y, 3, 16) * 0.3)
+    return f
+
+
+def wallpaper(base, stripe=None):
+    b, s = rgb(base), rgb(stripe or base)
+
+    def f(x, y):
+        if y >= 2 * TILE - 5:  # skirting board
+            return mix(b, INK, 0.5 if y == 2 * TILE - 5 else 0.32)
+        c = s if (x // 4) % 3 == 0 else b
+        return mix(c, INK, dq(max(0.0, 0.3 - y / 70), x, y, 3))  # a touch darker under the ceiling
+    return f
+
+
+def shadow(img, cx, cy, rx, ry, amt=0.22):
+    px = img.load()
+    for y in range(int(cy - ry), int(cy + ry) + 1):
+        for x in range(int(cx - rx), int(cx + rx) + 1):
+            if 0 <= x < img.width and 0 <= y < img.height and ((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 <= 1:
+                px[x, y] = mix(px[x, y], INK, amt)
+
+
+def wall_window(c, x, y, w, h):
+    frame = T("#fffaf2", "#ece2d2", "#c8b8a2")
+    c.rect(x, y, x + w, y + h, frame)
+    c.rect(x + 2, y + 2, x + w - 2, y + h - 2, GLASS, edge=False)
+    c.rect(x + w / 2 - 0.5, y + 2, x + w / 2 + 0.5, y + h - 2, frame, edge=False)
+    c.dots([(x + 4, y + 5), (x + 5, y + 4), (x + w / 2 + 4, y + 5), (x + w / 2 + 5, y + 4)], WHITE)
+
+
+def rug(c, x0, y0, x1, y1, edge, inner):
+    c.rect(x0, y0, x1, y1, shades(edge))
+    c.rect(x0 + 3, y0 + 3, x1 - 3, y1 - 3, shades(inner), edge=False)
+
+
+def picture(c, x, y, w, h, color):
+    c.rect(x, y, x + w, y + h, DARKWOOD)
+    c.rect(x + 2, y + 2, x + w - 2, y + h - 2, shades(color), edge=False)
+    c.poly([(x + 2, y + h - 2), (x + w * 0.4, y + h * 0.45), (x + w - 2, y + h - 2)], shades("#5cb85a"), edge=False)
+
+
+# ---- props: drawn bottom-centre on the feet (the bottom edge of the tiles they stand on)
+
+def tree(kind):
+    c = Canvas(34, 46)
+    c.rect(14, 30, 20, 44, T("#b07a4a", "#8a5a34", "#663f22"))
+    if kind == 0:
+        leaf = T("#a6ec78", "#6cc24e", "#4a9a3e")
+        for x, y, r in ((17, 20, 12), (9, 25, 8), (25, 25, 8), (17, 11, 9)):
+            c.ellipse(x, y, r, r * 0.9, leaf)
+        c.dots([(12, 14), (22, 19), (15, 26)], rgb("#ff6a7a"))
+    else:  # pine
+        leaf = T("#7ee0a0", "#3faa70", "#2a7c52")
+        for y0, hw in ((2, 6), (10, 10), (18, 13)):
+            c.poly([(17, y0), (17 - hw, y0 + 15), (17 + hw, y0 + 15)], leaf)
+    return c.image()
+
+
+def bush():
+    c = Canvas(22, 16)
+    leaf = T("#a6ec78", "#6cc24e", "#4a9a3e")
+    for x, y, r in ((7, 9, 5.5), (15, 9, 5.5), (11, 6, 5)):
+        c.ellipse(x, y, r, r * 0.85, leaf)
+    c.dots([(8, 6), (14, 8)], rgb("#ffd1e6"))
+    return c.image()
+
+
+def rock():
+    c = Canvas(20, 14)
+    c.ellipse(10, 8, 8, 5, T("#e2e0ea", "#b8b4c6", "#8a86a0"))
+    c.ellipse(7, 6, 3, 2, T("#f4f2f8", "#d8d4e4", "#b0aac4"), edge=False)
+    return c.image()
+
+
+def lamp_post():
+    c = Canvas(12, 38)
+    pole = T("#5a5f70", "#3f4454", "#2c303c")
+    c.rect(5, 8, 7, 36, pole)
+    c.rect(3, 33, 9, 36, pole)
+    c.ellipse(6, 6, 4.5, 4.5, T("#fffbe0", "#ffe08a", "#f0b84a"))
+    return c.image()
+
+
+def fountain():
+    c = Canvas(50, 42)
+    stone = T("#f2f0f6", "#d2d0de", "#a8a6ba")
+    c.ellipse(25, 30, 23, 10, stone)
+    c.ellipse(25, 29, 19, 7, T("#b8ecff", "#6cc6f0", "#3a96d0"), edge=False)
+    c.rect(22, 10, 28, 29, stone)
+    c.ellipse(25, 10, 7, 3, stone)
+    c.dots([(18, 6), (16, 9), (32, 6), (34, 9), (25, 3), (21, 16), (29, 16)], rgb("#b8ecff"))
+    return c.image()
+
+
+def apartment():
+    c = Canvas(82, 118)
+    c.rect(3, 10, 79, 32, T("#c8ccd8", "#a8aebe", "#8a90a2"))  # flat roof, seen from above
+    c.rect(56, 13, 70, 24, METAL)  # the air conditioner
+    c.rect(3, 30, 79, 116, T("#fff4dc", "#f6e2bc", "#dcc092"))
+    c.rect(1, 28, 81, 33, T("#e8ecf4", "#cdd2de", "#a8aebe"))
+    sill = T("#fffaf2", "#ece2d2", "#c8b8a2")
+    for row in range(3):
+        for col in range(3):
+            if row == 2 and col == 1:
+                continue
+            x, y = 9 + col * 24, 40 + row * 25
+            c.rect(x, y, x + 16, y + 15, sill)
+            c.rect(x + 2, y + 2, x + 14, y + 13, GLASS, edge=False)
+            c.rect(x - 1, y + 15, x + 17, y + 17, sill)
+    c.poly([(28, 94), (54, 94), (50, 88), (32, 88)], shades("#f06a5a"))  # awning
+    c.rect(33, 94, 49, 116, shades("#4f86e0"))
+    c.rect(40.5, 96, 41.5, 116, rgb("#2f5aa0"), edge=False)
+    return c.image()
+
+
+def library_b():
+    c = Canvas(114, 104)
+    stone = T("#f4f0e8", "#dcd6ca", "#b8b0a2")
+    c.rect(6, 40, 108, 100, stone)
+    c.poly([(2, 42), (57, 6), (112, 42)], shades("#5f86d8"))  # pediment
+    c.poly([(18, 37), (57, 14), (96, 37)], stone, edge=False)
+    c.ellipse(57, 28, 6, 6, shades("#ffcc33"))
+    for x in (12, 30, 76, 94):
+        c.rect(x, 46, x + 8, 96, T("#ffffff", "#ece8e0", "#c8c0b2"))
+    c.rect(46, 62, 68, 98, DARKWOOD)
+    c.rect(50, 66, 64, 76, GLASS, edge=False)
+    c.rect(4, 96, 110, 102, stone)  # steps
+    return c.image()
+
+
+def gym_b():
+    c = Canvas(114, 96)
+    brick = shades("#e0664a")
+    c.rect(4, 8, 110, 28, T("#8a8fa8", "#62677e", "#474b5e"))
+    c.rect(4, 26, 110, 94, brick)
+    c.dots([(x, y) for y in range(32, 92, 6) for x in range(8 + (y // 6 % 2) * 6, 108, 12)], mix(brick[1], INK, 0.25))
+    for x in (10, 70):
+        c.rect(x, 38, x + 34, 66, METAL)
+        c.rect(x + 2, 40, x + 32, 64, GLASS, edge=False)
+    c.rect(46, 66, 68, 94, METAL)
+    c.rect(48, 68, 56.5, 94, GLASS, edge=False)
+    c.rect(57.5, 68, 66, 94, GLASS, edge=False)
+    c.rect(36, 1, 78, 13, T("#ffffff", "#f0f2fa", "#d4d8e8"))  # the sign on the roof
+    c.rect(46, 6, 68, 8, METAL, edge=False)
+    for x in (43, 66):
+        c.rect(x, 3, x + 5, 11, shades("#3f4454"), edge=False)
+    return c.image()
+
+
+def shop_b():
+    c = Canvas(82, 100)
+    c.poly([(2, 34), (12, 6), (70, 6), (80, 34)], shades("#f08840"))
+    c.rect(4, 32, 78, 98, shades("#f0b878"))
+    for i in range(8):
+        x = 4 + i * 9.25
+        c.rect(x, 46, x + 9.25, 56, shades("#f05a5a" if i % 2 == 0 else "#fff6f0"))
+    c.rect(24, 36, 58, 44, DARKWOOD)
+    c.ellipse(41, 40, 3, 3, shades("#ffcc33"))
+    c.rect(8, 62, 28, 84, GLASS)
+    c.ellipse(14, 80, 3, 2.5, shades("#f0434f"))
+    c.ellipse(21, 80, 3, 2.5, shades("#a05aff"))
+    c.rect(33, 64, 49, 98, shades("#6cbf4a"))
+    c.rect(56, 62, 74, 84, GLASS)
+    return c.image()
+
+
+def arena_b():
+    c = Canvas(114, 108)
+    stone = T("#f0dcc0", "#d8bc98", "#b49674")
+    c.ellipse(57, 50, 54, 44, stone)
+    c.ellipse(57, 40, 42, 24, T("#ffe9b0", "#f4d48a", "#dcb468"), edge=False)  # the sand, over the rim
+    c.rect(3, 50, 111, 106, stone)
+    dark = shades("#6a4a3a")
+    for i in range(5):
+        x = 8 + i * 21
+        if i != 2:
+            c.rect(x, 66, x + 12, 88, dark)
+            c.ellipse(x + 6, 66, 6, 4, dark)
+    c.rect(48, 76, 66, 106, dark)
+    c.ellipse(57, 76, 9, 6, dark)
+    for x, col in ((14, "#e0483e"), (100, "#5a8ae0")):
+        c.rect(x, 2, x + 1, 30, METAL)
+        c.poly([(x + 1, 3), (x + 12, 7), (x + 1, 12)], shades(col))
+    return c.image()
+
+
+def shrine():
+    c = Canvas(82, 100)
+    stone = T("#ece6ff", "#bdb4dc", "#8e84b4")
+    c.rect(4, 84, 78, 98, stone)
+    for x in (8, 64):
+        c.rect(x, 32, x + 10, 86, stone)
+    c.poly([(2, 36), (41, 4), (80, 36)], shades("#6a4ad8"))
+    c.ellipse(41, 22, 4, 4, shades("#ff6ad8"))
+    c.ring(41, 62, 20, 24, 4, stone, clip=lambda x, y: y < 86)
+    swirl_disc(c, 41, 62, 16, 20, 86)
+    return c.image()
+
+
+def swirl_disc(c, cx, cy, rx, ry, below):
+    """The portal's swirl, an ellipse cut off at y `below`."""
     p = c._part(False)
     swirl = [rgb(h) for h in ("#1d1540", "#3a2a8a", "#6048d0", "#44c6d6", "#b8f4ff")]
-    for y in range(10, 65):
-        for x in range(86, 139):
-            u, v = (x + 0.5 - 112) / 24, (y + 0.5 - 50) / 34
+    for y in range(int(cy - ry), min(below, int(cy + ry) + 1)):
+        for x in range(int(cx - rx), int(cx + rx) + 1):
+            u, v = (x + 0.5 - cx) / rx, (y + 0.5 - cy) / ry
             r = math.hypot(u, v)
             if r <= 1:
                 band = (math.atan2(v, u) / (2 * math.pi) * 3 + r * 2.2) % 1
-                i = int(dq(band * 0.8 + (1 - r) * 0.5, x, y, 4) * 4)
-                c.put(x, y, swirl[min(4, i)], p)
-    c.rect(80, 64, 144, 68, stone)
-    img.alpha_composite(c.image())
-    glow(img, 112, 46, 64, "#7a5aff", 0.3)
-    glow(img, 112, 52, 30, "#5ae0f0", 0.18)
-    return img, dict(spot=[58, 74])
+                c.put(x, y, swirl[min(4, int(dq(band * 0.8 + (1 - r) * 0.5, x, y, 4) * 4))], p)
 
 
-def room_arena():
-    img, c = base_room(wall=("#262030", "#19161f"), floor=("#2e2835", "#211d27"), planks=False), Canvas(RW, RH)
-    for x, col in ((22, ("#8a5064", "#6e3e50", "#54303d")), (160, ("#50648a", "#3e4f6e", "#303d54"))):
-        c.poly([(x, 4), (x + 18, 4), (x + 18, 38), (x + 9, 33), (x, 38)], T(*col))
-        c.ellipse(x + 9, 18, 4, 4, T("#f0d890", "#d8b860", "#b09040"), edge=False)
-    c.ring(100, 74, 72, 8, 1.2, T("#5a4a6e", "#4c3e5e", "#40344f"), edge=False)
-    c.rect(99, 66, 101, 82, rgb("#4c3e5e"), edge=False)
-    img.alpha_composite(c.image())
-    px = img.load()
-    for y in range(RH):
-        half = 10 + y * 0.75
-        for x in range(RW):
-            d = abs(x + 0.5 - 100) / half
-            if d < 1:
-                px[x, y] = mix(px[x, y], rgb("#e8e0ff"), dq((1 - d) ** 0.7 * (0.3 + 0.5 * y / RH), x, y, 4) * 0.22)
-    return img, dict(spot=[60, 74], spot2=[140, 74])
+def portal_arch():
+    c = Canvas(82, 62)
+    stone = T("#d8d0f0", "#aaa0cc", "#7e74a4")
+    c.rect(4, 50, 78, 60, stone)
+    c.ring(41, 34, 30, 30, 6, stone, clip=lambda x, y: y < 52)
+    swirl_disc(c, 41, 34, 24, 24, 52)
+    c.ellipse(41, 6, 3, 3, shades("#ff6ad8"))
+    return c.image()
 
 
-def room_shop():
-    rnd = random.Random(11)
-    img, c = base_room(), Canvas(RW, RH)
-    for sy in (24, 42):
-        c.rect(22, sy, 178, sy + 2, WOOD)
-        x = 28
-        while x < 170:
-            col = rgb(rnd.choice(["#b05a6a", "#5a82b0", "#6ab086", "#c0a05a", "#8e6ab0", "#b0845a"]))
+def candle():
+    c = Canvas(10, 20)
+    c.rect(3, 8, 7, 18, shades("#fff4dc"))
+    c.ellipse(5, 5, 2, 3, T("#fffbd0", "#ffcc33", "#ff8a3a"))
+    return c.image()
+
+
+def crystal():
+    c = Canvas(16, 22)
+    t = shades("#b07aff")
+    c.poly([(8, 1), (12, 8), (10, 20), (6, 20), (4, 8)], t)
+    c.poly([(3, 10), (6, 13), (5, 20), (2, 20), (1, 14)], t)
+    return c.image()
+
+
+def bed():
+    c = Canvas(34, 58)
+    c.rect(2, 2, 32, 14, DARKWOOD)  # headboard, against the wall
+    c.rect(2, 10, 32, 56, WOOD)
+    c.rect(4, 12, 30, 54, T("#ffffff", "#f2eef8", "#d4cce4"))
+    c.rect(7, 13, 27, 22, T("#ffffff", "#f6f4fa", "#dcd6e8"))
+    c.rect(4, 28, 30, 54, shades("#6e9cf0"))
+    c.rect(4, 28, 30, 31, shades("#a4c4ff"), edge=False)
+    return c.image()
+
+
+def nightstand():
+    c = Canvas(18, 30)
+    c.rect(2, 16, 16, 28, WOOD)
+    c.rect(4, 21, 14, 22, DARKWOOD[2], edge=False)
+    c.rect(8, 8, 10, 16, METAL)
+    c.poly([(3, 9), (15, 9), (12, 2), (6, 2)], T("#fff2c8", "#ffd98a", "#e6b45e"))
+    return c.image()
+
+
+def sofa():
+    c = Canvas(50, 32)
+    cloth, cush = shades("#f07e6e"), shades("#ff9e8e")
+    c.rect(4, 2, 46, 18, cloth)
+    c.rect(2, 14, 48, 30, cloth)
+    c.rect(1, 8, 9, 30, cloth)
+    c.rect(41, 8, 49, 30, cloth)
+    c.rect(10, 12, 25, 22, cush)
+    c.rect(25, 12, 40, 22, cush)
+    return c.image()
+
+
+def fridge():
+    c = Canvas(18, 42)
+    c.rect(1, 2, 17, 40, T("#ffffff", "#e6ecf4", "#b8c2d2"))
+    c.rect(2, 15, 16, 16, rgb("#9aa4b4"), edge=False)
+    c.rect(13, 6, 14, 12, METAL, edge=False)
+    c.rect(13, 19, 14, 30, METAL, edge=False)
+    c.dots([(5, 6), (8, 8), (6, 22)], rgb("#ff6a7a"))
+    c.dots([(9, 5), (5, 25)], rgb("#5ac8f0"))
+    return c.image()
+
+
+def stove():
+    c = Canvas(34, 30)
+    c.rect(1, 10, 33, 28, T("#fff8ee", "#ece2d2", "#c8b8a2"))
+    c.rect(1, 4, 33, 11, T("#d0d6e0", "#aab2c0", "#848c9c"))
+    c.ring(9, 7.5, 4, 2.2, 1, rgb("#4a4e5c"), edge=False)
+    c.rect(5, 14, 29, 25, shades("#3f4454"))
+    c.rect(8, 17, 26, 22, rgb("#ffb070"), edge=False)
+    c.ellipse(23, 5, 5, 3.5, shades("#f0434f"))
+    return c.image()
+
+
+def cooler():
+    c = Canvas(16, 34)
+    c.rect(2, 16, 14, 32, T("#ffffff", "#e8ecf4", "#b8c2d2"))
+    c.rect(3, 4, 13, 16, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
+    c.ellipse(8, 4, 5, 2.4, T("#c8ecff", "#7cc4f0", "#4f9ad0"))
+    c.dots([(5, 21), (6, 21)], rgb("#5ac8f0"))
+    c.dots([(10, 21), (11, 21)], rgb("#e0483e"))
+    return c.image()
+
+
+def plant():
+    c = Canvas(18, 30)
+    c.rect(4, 18, 14, 28, shades("#e07a50"))
+    leaf = T("#a6ec78", "#5cb84a", "#3f8f3c")
+    for x, y, rx, ry in ((9, 10, 4, 7), (5, 13, 3.5, 5), (13, 13, 3.5, 5)):
+        c.ellipse(x, y, rx, ry, leaf)
+    return c.image()
+
+
+def table():
+    c = Canvas(34, 26)
+    c.rect(6, 12, 9, 24, DARKWOOD)
+    c.rect(25, 12, 28, 24, DARKWOOD)
+    c.ellipse(17, 11, 15, 7, WOOD)
+    c.rect(20, 4, 25, 10, T("#ffffff", "#f0f0f6", "#c8c8d8"))
+    c.ellipse(11, 10, 3, 2, shades("#f0434f"))
+    return c.image()
+
+
+def books_shelf(seed):
+    c = Canvas(34, 46)
+    bookshelf(c, random.Random(seed), 1, 33, 2, 44)
+    return c.image()
+
+
+def desk():
+    c = Canvas(34, 30)
+    c.rect(1, 12, 33, 28, WOOD)
+    c.rect(1, 7, 33, 13, T("#f6d2a0", "#e0b47e", "#c0925c"))
+    c.rect(14, 8, 22, 11, T("#ffffff", "#fffaf0", "#ecdcc0"), edge=False)
+    c.rect(4, 4, 11, 9, shades("#5a8ae0"))
+    c.rect(5, 2, 10, 5, shades("#e85a6a"))
+    c.rect(27, 3, 28, 9, METAL)
+    c.poly([(24, 4), (31, 4), (29, 1), (26, 1)], T("#fff2c8", "#ffd98a", "#e6b45e"))
+    return c.image()
+
+
+def floor_lamp():
+    c = Canvas(14, 36)
+    c.rect(6, 10, 8, 33, METAL)
+    c.ellipse(7, 33, 4, 1.6, METAL)
+    c.poly([(2, 11), (12, 11), (10, 2), (4, 2)], T("#fff2c8", "#ffd98a", "#e6b45e"))
+    return c.image()
+
+
+def rack():
+    c = Canvas(34, 32)
+    c.rect(2, 8, 4, 30, METAL)
+    c.rect(30, 8, 32, 30, METAL)
+    for y in (13, 23):
+        c.rect(2, y, 32, y + 2, METAL)
+        for i, col in enumerate(("#ff6a5a", "#5a8ae0", "#ffcc33", "#5cb85a")):
+            x = 6 + i * 6.5
+            c.rect(x, y - 4, x + 2, y + 2, shades(col))
+            c.rect(x + 3, y - 4, x + 5, y + 2, shades(col))
+    return c.image()
+
+
+def platform():
+    c = Canvas(34, 34)
+    c.rect(1, 6, 33, 33, shades("#6a7084"))
+    c.rect(5, 10, 29, 29, shades("#c89a62"), edge=False)
+    c.rect(2, 1, 4, 10, METAL)
+    c.rect(30, 1, 32, 10, METAL)
+    return c.image()
+
+
+def treadmill():
+    c = Canvas(30, 36)
+    frame = shades("#5a5f70")
+    c.rect(3, 8, 27, 35, frame)
+    c.rect(7, 11, 23, 33, shades("#2c303c"), edge=False)
+    for y in range(13, 33, 4):
+        c.rect(7, y, 23, y + 0.8, rgb("#4a4f60"), edge=False)
+    c.rect(1, 6, 4, 22, METAL)
+    c.rect(26, 6, 29, 22, METAL)
+    c.rect(5, 1, 25, 8, frame)
+    c.rect(9, 3, 21, 6, rgb("#3fd07a"), edge=False)
+    return c.image()
+
+
+def punching_bag():
+    c = Canvas(16, 42)
+    c.rect(7.5, 1, 8.5, 10, METAL)
+    c.rect(3, 9, 13, 38, shades("#e0483e"))
+    c.ellipse(8, 9, 5, 2, shades("#e0483e"))
+    c.rect(3, 15, 13, 17, shades("#2c303c"), edge=False)
+    return c.image()
+
+
+def ring():
+    c = Canvas(130, 84)
+    c.rect(2, 8, 128, 82, shades("#5a8ae0"))
+    c.rect(8, 12, 122, 76, T("#ffffff", "#f0f2fa", "#d4d8e8"), edge=False)
+    for x0, y0 in ((4, 2), (122, 2), (4, 64), (122, 64)):
+        c.rect(x0, y0, x0 + 5, y0 + 16, shades("#e0483e"))
+    for y in (5, 9):
+        c.rect(9, y, 122, y + 1, rgb("#ffcc33"), edge=False)
+    return c.image()
+
+
+def bleachers():
+    c = Canvas(50, 28)
+    c.rect(1, 2, 49, 13, WOOD)
+    c.rect(1, 12, 49, 26, shades("#c8935e"))
+    c.rect(1, 12, 49, 13, DARKWOOD[1], edge=False)
+    return c.image()
+
+
+def shop_shelf(seed):
+    c = Canvas(50, 46)
+    c.rect(2, 2, 48, 44, WOOD)
+    rnd = random.Random(seed)
+    for sy in (15, 29, 43):
+        c.rect(3, sy - 1, 47, sy + 1, DARKWOOD, edge=False)
+        x = 5
+        while x < 42:
+            col = shades(rnd.choice(["#e85a6a", "#5a8ae0", "#5cb85a", "#f0b84a", "#8e6ad8", "#e88a4a"]))
             if rnd.random() < 0.5:
-                c.ellipse(x + 2.5, sy - 3, 3, 3, (mix(col, WHITE, 0.3), col, mix(col, INK, 0.3)))
-                c.rect(x + 1.5, sy - 8, x + 3.5, sy - 6, T("#e0dce8", "#c8c2d4", "#a49eb4"))
+                c.ellipse(x + 2.5, sy - 4, 3, 3, col)
             else:
-                c.rect(x, sy - 7, x + 5, sy, (mix(col, WHITE, 0.3), col, mix(col, INK, 0.3)))
-            x += rnd.randint(9, 13)
-    c.dots([(100, y) for y in range(0, 5)], rgb("#4a4658"))
-    c.rect(86, 5, 114, 13, WOOD)
-    c.ellipse(100, 9, 2.5, 2.5, T("#fff3a0", "#ffcc33", "#d9961f"), edge=False)
-    c.rect(40, 50, 160, 66, T("#5a4a40", "#4a3c34", "#3a2e28"))
-    c.rect(36, 47, 164, 51, T("#7a6a5c", "#665748", "#524538"))
-    c.rect(128, 38, 146, 47, T("#4a4e5c", "#3a3e4a", "#2c2f38"))
-    c.rect(131, 40, 138, 43, rgb("#3fd07a"), edge=False)
+                c.rect(x, sy - 9, x + 5, sy - 1, col)
+            x += rnd.randint(7, 9)
+    return c.image()
+
+
+def counter():
+    c = Canvas(66, 32)
+    c.rect(1, 12, 65, 30, WOOD)
+    c.rect(1, 7, 65, 13, T("#f6d2a0", "#e0b47e", "#c0925c"))
+    c.rect(44, 1, 58, 10, shades("#4a4e5c"))
+    c.rect(46, 3, 56, 6, rgb("#3fd07a"), edge=False)
+    c.ellipse(14, 8, 4, 2.5, shades("#ffcc33"))
+    c.ellipse(22, 9, 3, 2, shades("#ffcc33"))
+    return c.image()
+
+
+def display():
+    c = Canvas(34, 24)
+    c.rect(3, 12, 6, 22, DARKWOOD)
+    c.rect(28, 12, 31, 22, DARKWOOD)
+    c.rect(1, 8, 33, 14, WOOD)
+    for x, col in ((9, "#ff4a6a"), (17, "#a05aff"), (25, "#5cb85a")):
+        c.ellipse(x, 6, 3, 3.4, shades(col))
+    return c.image()
+
+
+BUILDINGS = {"apartment": apartment, "library": library_b, "gym": gym_b, "shop": shop_b, "arena": arena_b, "shrine": shrine}
+SPRITES, SPRITE_IDS = [], {}
+
+
+def put(pl, name, fn, tx, ty, fw=1, fh=1, act=None, stand=None, low=False, block=True, args=()):
+    """Stand prop `name` (drawn by `fn`) on tiles tx..tx+fw, ty..ty+fh. `low` ones (beds, mats) go
+    under every pet; the rest sort with the pets by their feet. Clicking a prop with an `act`
+    walks the pet to `stand` (by default just in front of it) and then does it."""
+    if name not in SPRITE_IDS:
+        SPRITE_IDS[name] = len(SPRITES)
+        SPRITES.append(fn(*args))
+    i = SPRITE_IDS[name]
+    img = SPRITES[i]
+    feet = [(tx + fw / 2) * TILE, (ty + fh) * TILE]
+    if block:
+        for y in range(ty, ty + fh):
+            for x in range(tx, tx + fw):
+                pl["walk"][y][x] = False
+    hot = None
+    if act:
+        hot = [feet[0] - img.width / 2, feet[1] - img.height, img.width, img.height]
+        stand = stand or [feet[0], feet[1] + TILE / 2]
+    pl["props"].append(dict(sprite=i, feet=feet, low=low, hot=hot, act=act, stand=stand))
+    return feet
+
+
+def tile_dist(w, h, solid):
+    """Steps (8-way) from every tile to the nearest one in `solid`."""
+    d = [[99] * w for _ in range(h)]
+    q = [(x, y) for x, y in solid if 0 <= x < w and 0 <= y < h]
+    for x, y in q:
+        d[y][x] = 0
+    i = 0
+    while i < len(q):
+        x, y = q[i]
+        i += 1
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and d[ny][nx] > d[y][x] + 1:
+                    d[ny][nx] = d[y][x] + 1
+                    q.append((nx, ny))
+    return d
+
+
+def sample(grid, x, y):
+    """`grid` (one value per tile centre) read smoothly at pixel (x, y)."""
+    gx, gy = x / TILE - 0.5, y / TILE - 0.5
+    i, j = math.floor(gx), math.floor(gy)
+    fx, fy = gx - i, gy - j
+    h, w = len(grid), len(grid[0])
+
+    def g(a, b):
+        return grid[min(h - 1, max(0, b))][min(w - 1, max(0, a))]
+    top = g(i, j) + (g(i + 1, j) - g(i, j)) * fx
+    bot = g(i, j + 1) + (g(i + 1, j + 1) - g(i, j + 1)) * fx
+    return top + (bot - top) * fy
+
+
+def build_town():
+    w, h = 60, 40
+    cx, cy, rx, ry = 30, 20, 28.5, 18
+    plaza = (26, 17, 9, 7)
+    # (place, sprite, footprint x, y, w, h in tiles); the door is the tile under the middle of the footprint
+    buildings = [("home", "apartment", 10, 8, 5, 4), ("library", "library", 27, 6, 7, 4), ("portal", "shrine", 44, 7, 5, 4),
+                 ("gym", "gym", 44, 17, 7, 4), ("shop", "shop", 38, 27, 5, 4), ("arena", "arena", 13, 25, 7, 5)]
+    roads = [[(12, 12), (12, 20), (26, 20)], [(30, 10), (30, 17)], [(46, 11), (46, 14), (35, 14), (35, 17)],
+             [(47, 21), (47, 22), (35, 22)], [(40, 31), (40, 33), (30, 33), (30, 24)], [(16, 30), (16, 33), (30, 33)]]
+    pier = {(x, y) for x in range(29, 32) for y in range(34, 40)}
+    path = {(x, y) for x in range(plaza[0], plaza[0] + plaza[2]) for y in range(plaza[1], plaza[1] + plaza[3])}
+    for pts in roads:  # three tiles wide
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            path |= {(x, y) for x in range(min(x0, x1) - 1, max(x0, x1) + 2) for y in range(min(y0, y1) - 1, max(y0, y1) + 2)}
+    solid = path | pier | {(x, y) for _, _, bx, by, bw, bh in buildings for x in range(bx, bx + bw) for y in range(by - 2, by + bh)}
+    dist = tile_dist(w, h, solid)
+    lift = [[0.45 * max(0.0, 1 - d / 4) for d in row] for row in dist]  # keeps everything built on dry land
+
+    def field(x, y):
+        """Above 0 is land: an island, a bit ragged, raised wherever there's something built."""
+        u, v = abs(x / TILE - cx) / rx, abs(y / TILE - cy) / ry
+        return 1 - u ** 3 - v ** 3 + 0.12 * vnoise(x, y, 70, 11) + 0.05 * vnoise(x, y, 23, 12) + sample(lift, x, y)
+
+    img = Image.new("RGBA", (w * TILE, h * TILE))
+    px = img.load()
+    walk = [[False] * w for _ in range(h)]
+    deck = planks(PLANK)
+    for y in range(h * TILE):
+        for x in range(w * TILE):
+            t = (x // TILE, y // TILE)
+            f = field(x, y)
+            if t in pier:
+                c = deck(x, y)
+                if (x % TILE == 0 and (t[0] - 1, t[1]) not in pier) or (x % TILE == 15 and (t[0] + 1, t[1]) not in pier):
+                    c = mix(c, INK, 0.35)
+            elif f < 0:
+                c = mix(water(x, y, -f * 3), WHITE, 0.55) if f > -0.025 else water(x, y, -f * 3)
+            elif t in path:
+                c = cobble(x, y)
+            else:
+                c = sand(x, y) if f < 0.08 else grass(x, y)
+                if any(((x + dx) // TILE, (y + dy) // TILE) in path for dx, dy in N4):  # kerb
+                    c = mix(c, INK, 0.2)
+            px[x, y] = c
+            if x % TILE == 8 and y % TILE == 8:
+                walk[t[1]][t[0]] = f >= 0 or t in pier
+    pl = dict(key="town", w=w, h=h, ground=img, walk=walk, bg=list(rgb("#2c6fc0")[:3]), spawn=[12 * TILE + 8, 13 * TILE + 8],
+              doors=[], props=[], slots={})
+    for key, kind, bx, by, bw, bh in buildings:
+        door = [bx + bw // 2, by + bh]
+        feet = put(pl, kind, BUILDINGS[kind], bx, by, bw, bh, act="go:" + key, stand=[door[0] * TILE + 8, door[1] * TILE + 8])
+        shadow(img, feet[0], feet[1], bw * 8 + 4, 3)
+        pl["doors"].append(dict(at=door, to=key, arrive=None))
+    put(pl, "fountain", fountain, 29, 19, 3, 2)
+    for x, y in ((27, 18), (33, 18), (27, 22), (33, 22)):
+        put(pl, "lamp", lamp_post, x, y)
+    for ty in range(h):
+        for tx in range(w):
+            if not walk[ty][tx] or dist[ty][tx] < 2 or (tx, ty) in pier:
+                continue
+            f = field(tx * TILE + 8, ty * TILE + 8)
+            r = hsh(tx, ty, 31)
+            dense = 0.16 + 0.3 * vnoise(tx * TILE, ty * TILE, 120, 32)
+            if f < 0.12:
+                if r < 0.05:
+                    put(pl, "rock", rock, tx, ty)
+            elif r < dense:
+                kind = 0 if hsh(tx, ty, 33) < 0.55 else 1
+                feet = put(pl, f"tree{kind}", tree, tx, ty, args=(kind,))
+                shadow(img, feet[0], feet[1] - 3, 9, 3.5)
+            elif r < dense + 0.05:
+                put(pl, "bush", bush, tx, ty)
+            elif r > 0.9:  # flowers
+                for k in range(2):
+                    fx, fy = tx * TILE + 3 + int(hsh(tx, ty, 42 + k) * 10), ty * TILE + 3 + int(hsh(tx, ty, 44 + k) * 10)
+                    col = rgb(("#ff8ec2", "#ffffff", "#ffd84a", "#c49aff")[int(hsh(tx, ty, 46 + k) * 3.99)])
+                    for dx, dy in N4:
+                        px[fx + dx, fy + dy] = col
+                    px[fx, fy] = rgb("#ff8a3a")
+    return pl
+
+
+def room(key, w, h, floor, wall, decor=None, glows=()):
+    """A building's inside: `floor` under a two-tile wall painted by `wall` along the top, trim on the
+    other sides, and the way out in the middle of the bottom edge."""
+    W, H = w * TILE, h * TILE
+    img = Image.new("RGBA", (W, H))
+    px = img.load()
+    for y in range(H):
+        for x in range(W):
+            if y < 2 * TILE:
+                c = wall(x, y)
+            else:
+                c = floor(x, y)
+                if y < 2 * TILE + 4:  # the wall's shadow
+                    c = mix(c, INK, 0.2 - (y - 2 * TILE) * 0.05)
+            px[x, y] = c
+    door = w // 2
+    c = Canvas(W, H)
+    if decor:
+        decor(c, W, H)
+    rug(c, door * TILE + 1, H - 12, (door + 1) * TILE - 1, H - 1, "#a86a4a", "#d89a6a")
     img.alpha_composite(c.image())
-    glow(img, 100, 10, 60, WARM, 0.2, sy=0.9)
-    return img, dict(spot=[100, 74])
+    for g in glows:
+        glow(img, *g)
+    lip = mix(TRIM, WHITE, 0.25)
+    for y in range(H):
+        for x in range(W):
+            gap = door * TILE <= x < (door + 1) * TILE
+            if y < 4 or x < 5 or x >= W - 5 or (y >= H - 5 and not gap):
+                inner = (y == 3 and 4 <= x < W - 4) or (x in (4, W - 5) and y >= 3) or (y == H - 5 and 4 <= x < W - 4)
+                px[x, y] = lip if inner else TRIM
+    walk = [[1 <= x < w - 1 and 2 <= y < h - 1 for x in range(w)] for y in range(h)]
+    walk[h - 1][door] = True
+    pl = dict(key=key, w=w, h=h, ground=img, walk=walk, bg=[42, 32, 28], spawn=[door * TILE + 8, (h - 2) * TILE + 8],
+              doors=[dict(at=[door, h - 1], to="town", arrive=None)], props=[], slots={})
+    return pl
 
 
-# Where pets stand when several share a room (LAN). Slot 0 (and gym slot 1) sit on the furniture
-# a job uses, so a sleeping pet gets the bed and a runner gets the treadmill.
-SLOTS = {
-    "home": [[100, 74], [62, 75], [138, 75], [28, 77], [172, 77]],
-    "bedroom": [[146, 51], [58, 74], [98, 76], [24, 77], [124, 78]],
-    "kitchen": [[112, 74], [74, 75], [146, 76], [38, 77], [182, 77]],
-    "library": [[100, 74], [68, 76], [132, 76], [32, 77], [168, 77]],
-    "gym": [[98, 74], [163, 61], [66, 76], [130, 77], [30, 77]],
-    "portal": [[58, 74], [28, 76], [160, 76], [86, 78], [186, 77]],
-    "arena": [[60, 74], [140, 74], [100, 77], [24, 77], [176, 77]],
-    "shop": [[100, 74], [62, 75], [138, 75], [26, 77], [174, 77]],
-}
+def build_home():
+    def decor(c, W, H):
+        wall_window(c, 86, 5, 36, 20)
+        picture(c, 150, 8, 18, 14, "#8ab4ff")
+        rug(c, 5 * TILE + 2, 5 * TILE + 4, 10 * TILE - 2, 8 * TILE - 4, "#5a8ae0", "#9ec4ff")
+    pl = room("home", 14, 10, planks(T("#f2c690", "#deac74", "#c08e58")), wallpaper("#ffe6c8", "#ffd6b0"), decor,
+              glows=[(56, 36, 30, WARM, 0.25)])
+    put(pl, "bed", bed, 1, 2, 2, 3, act="sleep", low=True, stand=[32, 66])
+    put(pl, "nightstand", nightstand, 3, 2)
+    put(pl, "sofa", sofa, 5, 2, 3, 1)
+    put(pl, "fridge", fridge, 9, 2, act="feed")
+    put(pl, "stove", stove, 10, 2, 2, 1, act="feed")
+    put(pl, "cooler", cooler, 12, 2, act="drink")
+    put(pl, "table", table, 10, 6, 2, 1)
+    put(pl, "plant", plant, 1, 8)
+    put(pl, "plant", plant, 12, 8)
+    pl["slots"] = {"sleep": [[32, 66]], "egg": [[120, 104]]}
+    return pl
 
-# Clickable furniture: [x, y, w, h] in room pixels -> the action it starts (see Hot in art.rs).
-HOT = {
-    "home": [],
-    "bedroom": [{"rect": [103, 31, 90, 37], "act": "sleep"}],
-    "kitchen": [{"rect": [157, 13, 36, 54], "act": "feed"}, {"rect": [126, 28, 18, 39], "act": "drink"}],
-    "library": [{"rect": [72, 40, 56, 28], "act": "study"}, {"rect": [3, 8, 59, 60], "act": "study"}],
-    "gym": [{"rect": [10, 44, 46, 22], "act": "lift"}, {"rect": [139, 28, 54, 40], "act": "run"}],
-    "portal": [{"rect": [80, 9, 62, 59], "act": "explore"}],
-    "arena": [{"rect": [27, 57, 145, 23], "act": "challenge"}],
-    "shop": [{"rect": [22, 16, 156, 26], "act": "browse"}, {"rect": [36, 47, 128, 21], "act": "browse"}],
-}
 
-ROOMS = [("home", room_home), ("bedroom", room_bedroom), ("kitchen", room_kitchen), ("library", room_library),
-         ("gym", room_gym), ("portal", room_portal), ("arena", room_arena), ("shop", room_shop)]
+def build_library():
+    def decor(c, W, H):
+        wall_window(c, 104, 5, 48, 20)
+        rug(c, 7 * TILE + 2, 3 * TILE, 9 * TILE - 2, H - 12, "#b83a4a", "#e05a5a")
+    pl = room("library", 16, 10, planks(T("#d8a878", "#c0905e", "#9a7046")), wallpaper("#e4ecf8", "#d4e0f2"), decor,
+              glows=[(128, 40, 40, "#fff3c0", 0.2)])
+    for i, x in enumerate((1, 3, 11, 13)):
+        put(pl, f"shelf{i % 2}", books_shelf, x, 2, 2, 1, act="study", args=(3 + i % 2,))
+    for x in (5, 10):
+        put(pl, "floor lamp", floor_lamp, x, 2)
+    study = []
+    for x, y in ((3, 5), (11, 5), (3, 7), (11, 7)):
+        spot = [(x + 1) * TILE, y * TILE - 4]  # behind the desk, which hides the pet's legs
+        put(pl, "desk", desk, x, y, 2, 1, act="study", stand=spot)
+        study.append(spot)
+    put(pl, "plant", plant, 1, 8)
+    put(pl, "plant", plant, 14, 8)
+    pl["slots"] = {"study": study}
+    return pl
+
+
+def build_gym():
+    def decor(c, W, H):
+        c.rect(5, 17, W - 5, 21, shades("#ff6a5a"), edge=False)
+        c.rect(150, 5, 240, 26, METAL)
+        c.rect(152, 7, 238, 24, GLASS, edge=False)
+    pl = room("gym", 16, 10, mats("#6a7084"), wallpaper("#eef2f8"), decor, glows=[(195, 16, 40, "#dfe6ff", 0.2)])
+    put(pl, "rack", rack, 2, 2, 2, 1, act="lift")
+    put(pl, "bag", punching_bag, 7, 2)
+    lift, run = [], []
+    for x in (2, 5):
+        spot = [(x + 1) * TILE, 6 * TILE - 10]
+        put(pl, "platform", platform, x, 4, 2, 2, act="lift", low=True, stand=spot)
+        lift.append(spot)
+    for x in (10, 13):
+        spot = [(x + 1) * TILE, 6 * TILE - 10]
+        put(pl, "treadmill", treadmill, x, 4, 2, 2, act="run", low=True, stand=spot)
+        run.append(spot)
+    put(pl, "plant", plant, 14, 8)
+    pl["slots"] = {"lift": lift, "run": run}
+    return pl
+
+
+def build_portal():
+    def decor(c, W, H):
+        c.ring(W / 2, 6.2 * TILE, 52, 18, 2, shades("#b8a0ff"), edge=False)
+    pl = room("portal", 14, 10, flagstones(T("#a89ec8", "#8c82b2", "#6e6496")), wallpaper("#5a4a88", "#4e3f7a"), decor,
+              glows=[(112, 40, 64, "#7a5aff", 0.3), (112, 50, 30, "#5ae0f0", 0.15)])
+    put(pl, "portal", portal_arch, 5, 2, 5, 2, act="explore", stand=[7 * TILE + 8, 5 * TILE + 8])
+    for x in (3, 10):
+        put(pl, "candle", candle, x, 2)
+    for x in (1, 12):
+        put(pl, "crystal", crystal, x, 7)
+    return pl
+
+
+def build_arena():
+    def decor(c, W, H):
+        for x, col in ((40, "#e0483e"), (200, "#5a8ae0")):
+            c.poly([(x, 4), (x + 16, 4), (x + 16, 28), (x + 8, 23), (x, 28)], shades(col))
+            c.ellipse(x + 8, 14, 3.5, 3.5, shades("#ffcc33"), edge=False)
+    pl = room("arena", 16, 11, dirt(SAND), wallpaper("#f0dcc0", "#e8cca8"), decor)
+    put(pl, "ring", ring, 4, 4, 8, 5, act="challenge", low=True, block=False, stand=[8 * TILE + 8, 9 * TILE + 8])
+    for x in (1, 12):
+        put(pl, "bleachers", bleachers, x, 2, 3, 1)
+    pl["slots"] = {"fight": [[6 * TILE, 7 * TILE], [10 * TILE, 7 * TILE]]}
+    return pl
+
+
+def build_shop():
+    def decor(c, W, H):
+        wall_window(c, 84, 5, 56, 20)
+    pl = room("shop", 14, 10, checker("#fff6e6", "#bfe8dc"), wallpaper("#e4f6ec", "#d0eedf"), decor,
+              glows=[(112, 10, 60, WARM, 0.18)])
+    put(pl, "shelf", shop_shelf, 1, 2, 3, 1, act="browse", args=(11,))
+    put(pl, "shelf2", shop_shelf, 10, 2, 3, 1, act="browse", args=(12,))
+    put(pl, "counter", counter, 5, 4, 4, 1, act="browse")
+    put(pl, "display", display, 10, 6, 2, 1, act="browse")
+    put(pl, "plant", plant, 1, 8)
+    put(pl, "plant", plant, 12, 8)
+    return pl
+
+
+def build_world():
+    """The town first, then the inside of every building, with the doors between them joined up."""
+    town = build_town()
+    rooms = [build_home(), build_library(), build_gym(), build_portal(), build_arena(), build_shop()]
+    inside = {p["key"]: p for p in rooms}
+    for d in town["doors"]:
+        d["arrive"] = inside[d["to"]]["spawn"]
+    for p in rooms:
+        x, y = next(d["at"] for d in town["doors"] if d["to"] == p["key"])
+        p["doors"][0]["arrive"] = [x * TILE + 8, (y + 1) * TILE + 8]
+    return [town] + rooms
 
 
 # ----------------------------------------------------------------------------- main
+def pack(images, width, gap=0):
+    """Images left to right in rows `width` wide; returns the sheet and each one's [x, y, w, h]."""
+    x = y = row = 0
+    rects = []
+    for im in images:
+        if x and x + im.width > width:
+            x, y, row = 0, y + row + gap, 0
+        rects.append([x, y, im.width, im.height])
+        x += im.width + gap
+        row = max(row, im.height)
+    out = Image.new("RGBA", (width, y + row), (0, 0, 0, 0))
+    for im, r in zip(images, rects):
+        out.paste(im, (r[0], r[1]))
+    return out, rects
+
+
+def blit(dst, src, x, y):
+    """alpha_composite that may hang off the top or left edge."""
+    x, y = round(x), round(y)
+    l, t = max(0, -x), max(0, -y)
+    dst.alpha_composite(src.crop((l, t, src.width, src.height)), (x + l, y + t))
+
+
+MINI = (120, 80)  # the most room a place's minimap gets (pixels)
+
+
+def composite(p):
+    """A place as the game draws it: the ground, then its props back to front."""
+    im = p["ground"].copy()
+    for q in sorted(p["props"], key=lambda q: (not q["low"], q["feet"][1])):
+        s = SPRITES[q["sprite"]]
+        blit(im, s, q["feet"][0] - s.width / 2, q["feet"][1] - s.height)
+    return im
+
+
 def sheet(frames, cols, fw, fh):
     rows = (len(frames) + cols - 1) // cols
     img = Image.new("RGBA", (cols * fw, rows * fh), (0, 0, 0, 0))
@@ -1161,14 +1794,22 @@ def main():
     items = sheet([item(n) for n in ITEMS], 6, 16, 16)
     items.save(os.path.join(ROOT, "items.png"))
     sheet([need_icon(rows, pal) for _, pal, rows in NEEDS], len(NEEDS), 10, 10).save(os.path.join(ROOT, "needs.png"))
-    rooms = Image.new("RGBA", (RW, RH * len(ROOMS)))
-    meta["room_size"] = [RW, RH]
-    meta["rooms"] = []
-    for i, (name, fn) in enumerate(ROOMS):
-        img, info = fn()
-        rooms.paste(img, (0, i * RH))
-        meta["rooms"].append({"name": name, **info, "slots": SLOTS[name], "hot": HOT[name]})
-    rooms.save(os.path.join(ROOT, "rooms.png"))
+    world = build_world()
+    ground, rects = pack([p["ground"] for p in world], 960)
+    ground.save(os.path.join(ROOT, "places.png"))
+    # minimaps: each place with its props, shrunk to fit MINI
+    shots = [composite(p) for p in world]
+    minis = []
+    for im in shots:
+        k = min(MINI[0] / im.width, MINI[1] / im.height)
+        minis.append(im.resize((round(im.width * k), round(im.height * k)), Image.BOX))
+    mini, mrects = pack(minis, 256, gap=1)
+    mini.save(os.path.join(ROOT, "minimaps.png"))
+    meta["places"] = [dict(key=p["key"], size=[p["w"], p["h"]], img=r, mini=m, bg=p["bg"], spawn=p["spawn"], doors=p["doors"],
+                           props=p["props"], slots=p["slots"],
+                           walk=["".join("." if ok else "#" for ok in row) for row in p["walk"]]) for p, r, m in zip(world, rects, mrects)]
+    props, meta["sprites"] = pack(SPRITES, 512, gap=1)
+    props.save(os.path.join(ROOT, "props.png"))
     # app icon (.deb, macOS .app, Windows installer): happy dino, 16x so platform downscaling stays crisp
     happy = sheets["dino"].crop((0, adult + 5 * F, F, adult + 6 * F))
     icon = happy.resize((512, 512), Image.NEAREST)
@@ -1178,20 +1819,11 @@ def main():
     with open(os.path.join(ROOT, "meta.json"), "w") as fh:
         json.dump(meta, fh, separators=(",", ":"))
 
-    if len(sys.argv) > 1:  # contact sheet: every room with a pet on its spot, 2x
-        prev = Image.new("RGBA", (RW * 2 * 2 + 8, RH * 2 * 4 + 24), rgb("#111016"))
+    if len(sys.argv) > 1:  # contact sheet: every place with its props and a pet on its spawn point, then the minimaps
         idle = sheets["dino"].crop((0, adult, F, adult + F))
-        sleep = sheets["wolf"].crop((0, adult + 3 * F, F, adult + 4 * F))
-        for i, (name, _) in enumerate(ROOMS):
-            room = rooms.crop((0, i * RH, RW, (i + 1) * RH))
-            info = meta["rooms"][i]
-            x, y = info["spot"]
-            room.alpha_composite(sleep if name == "bedroom" else idle, (x - 16, y - 31))
-            if "spot2" in info:
-                x, y = info["spot2"]
-                room.alpha_composite(sheets["frog"].crop((0, adult + 2 * F, F, adult + 3 * F)), (x - 16, y - 31))
-            prev.alpha_composite(room.resize((RW * 2, RH * 2), Image.NEAREST), ((i % 2) * (RW * 2 + 8), (i // 2) * (RH * 2 + 8)))
-        prev.save(sys.argv[1])
+        for p, im in zip(world, shots):
+            blit(im, idle, p["spawn"][0] - F / 2, p["spawn"][1] - F)
+        pack(shots + [mini.resize((mini.width * 2, mini.height * 2), Image.NEAREST)], 960, gap=8)[0].save(sys.argv[1])
     print("assets ->", os.path.normpath(ROOT))
 
 

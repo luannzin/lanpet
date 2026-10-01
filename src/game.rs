@@ -1,6 +1,7 @@
 //! Pet simulation: stats, jobs, expeditions, items, battles and the save file.
 //! Everything is driven by wall-clock seconds so the pet keeps living while the app is closed.
 
+use crate::world::Loc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -170,9 +171,9 @@ impl Need {
     pub fn fix(self) -> &'static str {
         match self {
             Need::Sick => "Medicine or a good sleep helps",
-            Need::Thirsty => "Water's in the Kitchen",
-            Need::Hungry => "Food's in the Kitchen",
-            Need::Tired => "The bed's in the Bedroom",
+            Need::Thirsty => "There's water at home",
+            Need::Hungry => "There's food at home",
+            Need::Tired => "The bed's at home",
             Need::Sad => "Pets and treats help",
         }
     }
@@ -1141,9 +1142,11 @@ pub struct Save {
     /// Where on the screen (y, points) the desktop pet walks: wherever it was last dropped.
     #[serde(default)]
     pub floor: Option<f32>,
-    /// Room the pet was last in (index into `Room::ALL`), so the window opens there after a restart.
+    /// Where the pet was last, and its feet there (place pixels), so it's there after a restart.
     #[serde(default)]
-    pub room: u8,
+    pub loc: Option<Loc>,
+    #[serde(default)]
+    pub spot: Option<[f32; 2]>,
 }
 
 impl Save {
@@ -1170,7 +1173,7 @@ impl Save {
     }
 
     pub fn load(path: &Path) -> Save {
-        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None, room: 0 };
+        let fresh = || Save { id: Rng::seeded().next(), pet: None, late: None, out: false, floor: None, loc: None, spot: None };
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 // Never silently overwrite a save we can't read.
@@ -1312,13 +1315,14 @@ mod tests {
 
     #[test]
     fn save_round_trips() {
-        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0), room: 4 };
+        let s = Save { id: 7, pet: Some(Pet::new("Mochi".into(), Species::Monkey, 5)), late: None, out: true, floor: Some(900.0), loc: Some(Loc::Gym), spot: Some([5.0, 6.0]) };
         let back: Save = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(back.pet.as_ref().unwrap().bag.get(&Item::Apple), Some(&3));
-        assert!(back.out && back.floor == Some(900.0) && back.room == 4);
-        // saves from before the tray still load (they carried a window position)
-        let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0]}"#).unwrap();
-        assert_eq!(old.id, 7);
+        assert!(back.out && back.floor == Some(900.0) && back.loc == Some(Loc::Gym) && back.spot == Some([5.0, 6.0]));
+        // saves from before the tray still load (they carried a window position), and so do ones
+        // from before the walkable world (a room number): the pet starts out in town
+        let old: Save = serde_json::from_str(r#"{"id":7,"pet":null,"pos":[1.0,2.0],"room":3}"#).unwrap();
+        assert_eq!((old.id, old.loc, old.spot), (7, None, None));
         // pets from before life stages load as young adults
         let mut pet = serde_json::to_value(back.pet.unwrap()).unwrap();
         for k in ["age", "thirst", "sick", "strain", "care"] {

@@ -2,8 +2,8 @@
 //! LanPet: a tiny pixel pet that lives in your system tray and hangs out with coworkers' pets over the LAN.
 //!
 //! This file holds the app's state and its game loop (network, simulation, animation, actions).
-//! Drawing lives in `view`, its look in `look`, the per-room choices in `actions`, and the
-//! tray/popover/expanded window handling in `window`.
+//! Drawing lives in `view`, its look in `look`, the places and getting around them in `world`,
+//! the per-place choices in `actions`, and the tray/popover/expanded window handling in `window`.
 
 mod actions;
 mod art;
@@ -14,6 +14,7 @@ mod tray;
 mod update;
 mod view;
 mod window;
+mod world;
 
 // Portable Linux binary: newer glibc re-versioned a few libm functions egui uses, which would make
 // the build require the builder's glibc. Bind them to their original versions instead. Release is
@@ -26,7 +27,7 @@ std::arch::global_asm!(
     ".symver hypot, hypot@GLIBC_2.2.5",
 );
 
-use art::{Anim, Art, Room, assign_slots};
+use art::{Anim, Art, assign_slots};
 use eframe::egui::{self, Color32, Pos2, Rect, Ui, Vec2, pos2, vec2};
 use game::{BEAT, DAY, Event, Fighter, Hit, HitKind, Item, Job, Need, Report, Rng, Save, Slot, Species, Stage, ZONES, clean, now};
 use look::{AQUA, BLUE, DIM, GOLD, LEAF, PINK, RED, VIOLET};
@@ -36,10 +37,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tray::{Badge, Tray};
+use world::{Loc, TILE};
 
-/// Screen pixels per room/sprite pixel.
-const PX: f32 = 2.0;
-const FLOOR_Y: f32 = 74.0;
+/// Walking pace (place pixels per second); a pet off to run trots there faster.
+const WALK: f32 = 60.0;
+const TROT: f32 = 100.0;
 
 fn main() -> eframe::Result {
     let path = Save::path();
@@ -67,6 +69,11 @@ struct Peer {
     card: Card,
     addr: SocketAddr,
     seen: f64,
+    /// Where its feet are in `card.loc`, the rest of the way it's walking, and which way it faces.
+    pos: Pos2,
+    path: Vec<Pos2>,
+    flip: bool,
+    moving: bool,
 }
 
 struct Pending {
@@ -83,9 +90,9 @@ struct Incoming {
     until: f64,
 }
 
-/// A line in the chat log: something said in a room, or our pet's own news (`room` and `name` None).
+/// A line in the chat log: something said in a place, or our pet's own news (`room` and `name` None).
 struct ChatLine {
-    room: Option<Room>,
+    room: Option<Loc>,
     name: Option<String>,
     text: String,
     mine: bool,
@@ -145,17 +152,24 @@ struct Floater {
     size: f32,
 }
 
-/// Our pet's on-screen body (room pixels).
+/// Our pet's body in its place (place pixels) and where it's going.
 struct Motion {
-    x: f32,
-    y: f32,
+    pos: Pos2,
+    path: Vec<Pos2>,
+    /// What to do on arriving (the furniture that was clicked).
+    then: Vec<Act>,
+    /// The autopilot: a place to walk to, door by door.
+    goal: Option<Loc>,
+    /// Last time you sent it somewhere; it only wanders off on its own a while after.
+    last_click: f64,
+    /// Holding the mouse down steers it: the next re-aim at the pointer.
+    steer_at: f64,
     hop: f32,
     vy: f32,
     squash: f32,
     sv: f32,
     flip: bool,
     moving: bool,
-    target_x: f32,
     wander_at: f64,
     hop_at: f64,
     blink_at: f64,
@@ -228,7 +242,10 @@ enum Act {
     Sell(Item),
     Buy(Item),
     Unequip(Slot),
-    Go(Room),
+    /// Walk to a place, through whatever doors are on the way.
+    Go(Loc),
+    /// Walk to a point in this place, then do these.
+    Walk(Pos2, Vec<Act>),
     Select(Option<u64>),
     Challenge(u64),
     Wave(u64),
@@ -264,7 +281,10 @@ struct App {
     view: View,
     tab: Tab,
     want_view: Option<View>,
-    room: Room,
+    /// The place our pet is in (or left from, while it's away exploring).
+    loc: Loc,
+    /// Acts that came due outside the UI pass (arriving somewhere), run with the next frame's.
+    due: Vec<Act>,
     selected: Option<u64>,
     m: Motion,
     roam: Roam,
@@ -305,6 +325,8 @@ struct App {
     screen: Vec2,
     ppp: f32,
     win_rect: Rect,
+    /// The expanded view's size, as last dragged.
+    exp_size: Vec2,
     placed: bool,
     shown_at: f64,
     hidden_at: f64,
@@ -312,21 +334,14 @@ struct App {
     dirty: bool,
 }
 
-fn job_room(j: Job) -> Room {
+/// The place's spots a job uses (meta.json `slots`); expeditions happen elsewhere.
+fn job_key(j: Job) -> &'static str {
     match j {
-        Job::Study => Room::Library,
-        Job::Lift | Job::Run => Room::Gym,
-        Job::Sleep => Room::Bedroom,
-        Job::Explore(_) => Room::Portal,
-    }
-}
-
-/// Furniture slot a job wants in a shared room (see gen_assets.py SLOTS).
-fn job_slot(j: Job) -> Option<usize> {
-    match j {
-        Job::Sleep | Job::Study | Job::Lift => Some(0),
-        Job::Run => Some(1),
-        Job::Explore(_) => None,
+        Job::Study => "study",
+        Job::Lift => "lift",
+        Job::Run => "run",
+        Job::Sleep => "sleep",
+        Job::Explore(_) => "",
     }
 }
 
@@ -337,16 +352,6 @@ fn job_anim(j: Job) -> Anim {
         Job::Run => Anim::Run,
         Job::Sleep => Anim::Sleep,
         Job::Explore(_) => Anim::Idle,
-    }
-}
-
-/// Where a need gets fixed.
-fn need_room(n: Need) -> Room {
-    match n {
-        Need::Sick => Room::Shop,
-        Need::Thirsty | Need::Hungry => Room::Kitchen,
-        Need::Tired => Room::Bedroom,
-        Need::Sad => Room::Home,
     }
 }
 
@@ -391,9 +396,18 @@ impl App {
         };
         let mut rng = Rng::seeded();
         let hatch_name = game::random_name(&mut rng);
-        let room = Room::ALL.get(save.room as usize).copied().unwrap_or(Room::Home);
-        let mut app = App {
-            art: Art::load(&ctx),
+        let art = Art::load(&ctx);
+        // back where it was; a pet from before the walkable world starts out in town, an egg at home
+        let loc = match save.loc {
+            Some(Loc::Home(_)) => Loc::Home(save.id),
+            Some(l) => l,
+            None if save.pet.is_some() => Loc::Town,
+            None => Loc::Home(save.id),
+        };
+        let place = art.place(loc);
+        let pos = save.spot.map_or(place.spawn(), |s| place.clamp(Pos2::from(s)));
+        App {
+            art,
             tray: Tray::start(&ctx),
             update: update::Updater::start(),
             clock: Instant::now(),
@@ -407,18 +421,22 @@ impl App {
             view: View::Popover,
             tab: Tab::Here,
             want_view: None,
-            room,
+            loc,
+            due: Vec::new(),
             selected: None,
             m: Motion {
-                x: 100.0,
-                y: FLOOR_Y,
+                pos,
+                path: Vec::new(),
+                then: Vec::new(),
+                goal: None,
+                last_click: -100.0,
+                steer_at: 0.0,
                 hop: 0.0,
                 vy: 0.0,
                 squash: 0.0,
                 sv: 0.0,
                 flip: false,
                 moving: false,
-                target_x: 100.0,
                 wander_at: 2.0,
                 hop_at: 6.0,
                 blink_at: 1.0,
@@ -463,15 +481,13 @@ impl App {
             screen: Vec2::new(1920.0, 1080.0),
             ppp: 1.0,
             win_rect: Rect::NOTHING,
+            exp_size: window::EXPANDED,
             placed: false,
             shown_at: 0.0,
             hidden_at: -10.0,
             had_focus: false,
             dirty: false,
-        };
-        // the window starts open: show the room the pet is in (or working in)
-        app.room = app.pet_room().unwrap_or(app.room);
-        app
+        }
     }
 
     /// Seconds since start. egui's own clock stops while the window is hidden; this one doesn't.
@@ -491,47 +507,59 @@ impl App {
 
     // -------------------------------------------------------------------------------------- where things are
 
-    /// Room our pet is standing in; None while it's away on an expedition (or not hatched).
-    fn pet_room(&self) -> Option<Room> {
+    /// Place our pet is in; None while it's away on an expedition (or not hatched).
+    fn pet_loc(&self) -> Option<Loc> {
         let p = self.save.pet.as_ref()?;
-        if self.fight.is_some() {
-            return Some(Room::Arena);
-        }
         match p.task.map(|t| t.job) {
             Some(Job::Explore(_)) => None,
-            Some(j) => Some(job_room(j)),
-            None => Some(self.room),
+            _ => Some(self.loc),
         }
     }
 
-    /// Room currently on screen.
-    fn view_room(&self) -> Room {
-        if self.fight.is_some() { Room::Arena } else { self.room }
+    /// Place on screen: where our pet is, or the Arena while a battle is on.
+    fn view_loc(&self) -> Loc {
+        if self.fight.is_some() { Loc::Arena } else { self.loc }
     }
 
-    fn peers_in(&self, room: Room) -> impl Iterator<Item = &Peer> + '_ {
-        self.peers.values().filter(move |p| p.card.room == Some(room as u8))
+    fn job(&self) -> Option<Job> {
+        self.save.pet.as_ref().and_then(|p| p.task).map(|t| t.job)
     }
 
-    /// Shared-room layout: our slot (only when others are here) and every visible peer's slot.
-    fn layout(&self, room: Room) -> (Option<Pos2>, Vec<(u64, Pos2)>) {
-        let mut list: Vec<(u64, Option<usize>)> = self.peers_in(room).map(|p| (p.card.id, p.card.job.filter(|&j| job_room(j) == room).and_then(job_slot))).collect();
-        if list.is_empty() {
-            return (None, Vec::new());
+    /// Where a job happens.
+    fn job_loc(&self, j: Job) -> Loc {
+        match j {
+            Job::Study => Loc::Library,
+            Job::Lift | Job::Run => Loc::Gym,
+            Job::Sleep => Loc::Home(self.save.id),
+            Job::Explore(_) => Loc::Portal,
         }
-        if self.pet_room() == Some(room) && self.fight.is_none() {
-            let job = self.save.pet.as_ref().and_then(|p| p.task).map(|t| t.job);
-            list.push((self.save.id, job.filter(|&j| job_room(j) == room).and_then(job_slot)));
-        }
-        let slots: Vec<Pos2> = self.art.slots(room).collect();
-        let mut me = None;
+    }
+
+    /// Where a need gets fixed.
+    fn need_loc(&self, n: Need) -> Loc {
+        if n == Need::Sick { Loc::Shop } else { Loc::Home(self.save.id) }
+    }
+
+    fn peers_in(&self, loc: Loc) -> impl Iterator<Item = &Peer> + '_ {
+        self.peers.values().filter(move |p| p.card.loc == Some(loc))
+    }
+
+    /// Where the pets working here stand: each job's spots (desks, treadmills...) shared out the
+    /// same way on every LAN client.
+    fn job_spots(&self, loc: Loc) -> Vec<(u64, Pos2)> {
+        let place = self.art.place(loc);
         let mut out = Vec::new();
-        for (&(id, _), s) in list.iter().zip(assign_slots(&list, slots.len())) {
-            if let Some(s) = s {
-                if id == self.save.id { me = Some(slots[s]) } else { out.push((id, slots[s])) }
+        for key in ["study", "lift", "run", "sleep"] {
+            let mut pets: Vec<(u64, Option<usize>)> = self.peers_in(loc).filter(|p| p.card.job.map(job_key) == Some(key)).map(|p| (p.card.id, None)).collect();
+            if self.pet_loc() == Some(loc) && self.job().map(job_key) == Some(key) {
+                pets.push((self.save.id, None));
+            }
+            let spots = place.slots(key);
+            for (&(id, _), s) in pets.iter().zip(assign_slots(&pets, spots.len())) {
+                out.extend(s.map(|s| (id, Pos2::from(spots[s]))));
             }
         }
-        (me, out)
+        out
     }
 
     fn my_anim(&self, t: f64) -> Anim {
@@ -580,9 +608,12 @@ impl App {
         })
     }
 
-    fn bodies(&self, room: Room, t: f64) -> Vec<Body> {
+    /// Everyone to draw in `loc`, feet in place pixels.
+    fn bodies(&self, loc: Loc, t: f64) -> Vec<Body> {
+        let place = self.art.place(loc);
+        let spot = |key: &str, i: usize| place.slots(key).get(i).map_or(place.spawn(), |s| Pos2::from(*s));
         let mut v = Vec::new();
-        if let (Some(f), Room::Arena) = (&self.fight, room) {
+        if let (Some(f), Loc::Arena) = (&self.fight, loc) {
             for i in 0..2 {
                 let left = i == f.me;
                 let anim = if t < f.anim[i].1 {
@@ -600,7 +631,7 @@ impl App {
                     hat: f.hats[i],
                     anim,
                     frame: self.art.frame(anim, t + i as f64 * 0.37),
-                    feet: self.art.spot(Room::Arena, !left) + vec2(dir * f.lunge[i] * 24.0, 0.0),
+                    feet: spot("fight", if left { 0 } else { 1 }) + vec2(dir * f.lunge[i] * 24.0, 0.0),
                     squash: Vec2::splat(1.0),
                     flash: f.flash[i],
                     flip: !left,
@@ -611,12 +642,13 @@ impl App {
             return v;
         }
         if self.save.pet.is_none() {
-            if room == Room::Home {
+            if matches!(loc, Loc::Home(_)) {
                 let (frame, shake) = match self.hatch_at {
                     Some(s) => (1 + (((t - s) / 0.5) as usize).min(2), ((t - s) * 3.0) as f32),
                     None => ((t * 1.2) as usize % 2, 0.0),
                 };
                 let wob = (t as f32 * 40.0).sin() * shake;
+                let at = spot("egg", 0);
                 let egg = Body {
                     id: 0,
                     species: Species::ALL[self.hatch_species],
@@ -624,7 +656,7 @@ impl App {
                     hat: None,
                     anim: Anim::Egg,
                     frame,
-                    feet: pos2(100.0 + wob, FLOOR_Y),
+                    feet: at + vec2(wob, 0.0),
                     squash: Vec2::splat(1.0),
                     flash: 0.0,
                     flip: false,
@@ -634,19 +666,26 @@ impl App {
                 // the pet that died of old age keeps watch until the next egg hatches
                 if let Some(old) = &self.save.late {
                     let bob = (t * 1.6).sin() as f32 * 2.0;
-                    v.push(Body { id: 1, species: old.species, anim: Anim::Ghost, frame: self.art.frame(Anim::Ghost, t), feet: pos2(148.0, FLOOR_Y - 10.0 + bob), flip: true, name: None, ..egg });
+                    v.push(Body { id: 1, species: old.species, anim: Anim::Ghost, frame: self.art.frame(Anim::Ghost, t), feet: at + vec2(36.0, -10.0 + bob), flip: true, name: None, ..egg });
                 }
                 v.push(egg);
             }
             return v;
         }
-        if self.pet_room() == Some(room) {
-            v.extend(self.me_body(pos2(self.m.x, self.m.y + self.m.hop), t));
+        if self.pet_loc() == Some(loc) {
+            v.extend(self.me_body(self.m.pos + vec2(0.0, self.m.hop), t));
         }
-        for (id, feet) in self.layout(room).1 {
-            let Some(p) = self.peers.get(&id) else { continue };
+        let spots = self.job_spots(loc);
+        for p in self.peers_in(loc) {
+            let id = p.card.id;
+            let working = spots.iter().find(|s| s.0 == id).map(|s| s.1);
             let phase = (id % 997) as f64 * 0.37;
-            let anim = p.card.job.map_or(if (t + phase) % 4.0 < 0.13 { Anim::Blink } else { Anim::Idle }, job_anim);
+            let anim = match (p.card.job, working) {
+                (Some(j), Some(_)) => job_anim(j),
+                _ if p.moving => Anim::Walk,
+                _ if (t + phase) % 4.0 < 0.13 => Anim::Blink,
+                _ => Anim::Idle,
+            };
             v.push(Body {
                 id,
                 species: p.card.species,
@@ -654,15 +693,30 @@ impl App {
                 hat: p.card.hat,
                 anim,
                 frame: self.art.frame(anim, t + phase),
-                feet,
+                feet: working.unwrap_or(p.pos),
                 squash: Vec2::splat(1.0),
                 flash: 0.0,
-                flip: feet.x > 100.0,
+                flip: p.flip,
                 name: Some(p.card.name.clone()),
                 me: false,
             });
         }
         v
+    }
+
+    /// What the camera follows in `loc`: our pet, the egg, or the middle of a battle.
+    fn focus(&self, loc: Loc) -> Pos2 {
+        let place = self.art.place(loc);
+        if self.fight.is_some() && loc == Loc::Arena {
+            let s = place.slots("fight");
+            if let [a, b, ..] = s {
+                return Pos2::from(*a).lerp(Pos2::from(*b), 0.5);
+            }
+        }
+        if self.save.pet.is_none() {
+            return place.slots("egg").first().map_or(place.spawn(), |s| Pos2::from(*s));
+        }
+        if loc == self.loc { self.m.pos } else { place.spawn() }
     }
 
     fn card(&self) -> Option<Card> {
@@ -678,7 +732,8 @@ impl App {
             wins: p.wins,
             losses: p.losses,
             fighter: p.fighter(true),
-            room: self.pet_room().map(|r| r as u8),
+            loc: self.pet_loc(),
+            pos: [self.m.pos.x, self.m.pos.y],
             job: p.task.map(|t| t.job),
         })
     }
@@ -752,7 +807,8 @@ impl App {
     // -------------------------------------------------------------------------------------- per-frame logic
 
     fn persist(&mut self) {
-        self.save.room = self.pet_room().unwrap_or(self.room) as u8;
+        self.save.loc = Some(self.loc);
+        self.save.spot = Some([self.m.pos.x, self.m.pos.y]);
         if let Err(e) = self.save.store(&self.path) {
             eprintln!("lanpet: saving failed: {e}");
         }
@@ -801,14 +857,47 @@ impl App {
                 if card.id == self.save.id || (!self.peers.contains_key(&card.id) && self.peers.len() >= 64) {
                     return;
                 }
-                let before = self.peers.get(&card.id).and_then(|p| p.card.room);
-                if card.room != before && card.room == Some(self.view_room() as u8) {
+                let view = self.view_loc();
+                let at = card.loc.map(|l| self.art.place(l).clamp(Pos2::from(card.pos)));
+                let new = !self.peers.contains_key(&card.id);
+                let p = self.peers.entry(card.id).or_insert_with(|| Peer {
+                    card: card.clone(),
+                    addr: from,
+                    seen: t,
+                    pos: at.unwrap_or(Pos2::ZERO),
+                    path: Vec::new(),
+                    flip: false,
+                    moving: false,
+                });
+                if let (Some(loc), Some(at)) = (card.loc, at) {
+                    if new || p.card.loc != card.loc || p.pos.distance(at) > 4.0 * TILE {
+                        (p.pos, p.path) = (at, Vec::new()); // just here, or far off: put it there
+                    } else if p.path.is_empty() && p.pos.distance(at) > TILE {
+                        p.path = self.art.place(loc).path(p.pos, at).unwrap_or_default(); // drifted: walk it back
+                    }
+                }
+                if card.loc == Some(view) && (new || p.card.loc != card.loc) {
                     self.fresh.push(card.id);
                 }
-                self.peers.insert(card.id, Peer { card, addr: from, seen: t });
+                (p.card, p.addr, p.seen) = (card, from, t);
+            }
+            Msg::Move { id, loc, from, to } => {
+                let view = self.view_loc();
+                let place = self.art.place(loc);
+                let Some(p) = self.peers.get_mut(&id) else { return }; // wait for its Hello
+                let (from, to) = (place.clamp(Pos2::from(from)), place.clamp(Pos2::from(to)));
+                if p.card.loc != Some(loc) {
+                    (p.card.loc, p.pos) = (Some(loc), from);
+                    if loc == view {
+                        self.fresh.push(id);
+                    }
+                } else if p.pos.distance(from) > 1.5 * TILE {
+                    p.pos = from;
+                }
+                p.path = place.path(p.pos, to).unwrap_or_default();
             }
             Msg::Challenge { battle, card } => {
-                let away = self.pet_room().is_none();
+                let away = self.pet_loc().is_none();
                 if self.fight.is_some() || self.incoming.is_some() || self.pending.is_some() || away {
                     let why = if away { "is out adventuring" } else { "is busy right now" };
                     self.send(from, &Msg::Decline { battle, why: why.into() });
@@ -854,17 +943,16 @@ impl App {
                     self.confetti(a, 24);
                 }
             }
-            Msg::Chat { id, name, room, text } => {
+            Msg::Chat { id, name, loc, text } => {
                 if id == self.save.id {
                     return;
                 }
-                let room = Room::ALL[room as usize];
-                // hidden in the tray, talk in our pet's room is a notification (the desktop pet shows it itself)
-                if self.view == View::Tray && self.pet_room() == Some(room) {
+                // hidden in the tray, talk where our pet is is a notification (the desktop pet shows it itself)
+                if self.view == View::Tray && self.pet_loc() == Some(loc) {
                     self.attention = true;
-                    notify(format!("{name} in the {}", room.name()), text.clone());
+                    notify(format!("{name} {}", loc.at()), text.clone());
                 }
-                self.log(ChatLine { room: Some(room), name: Some(name), text: text.clone(), mine: false, at: t });
+                self.log(ChatLine { room: Some(loc), name: Some(name), text: text.clone(), mine: false, at: t });
                 self.say(id, text, t, 6.0);
             }
         }
@@ -920,15 +1008,6 @@ impl App {
         for e in ev {
             let a = self.anchor();
             self.dirty = true;
-            // a job ending out of sight leaves the pet where it worked, which is where the window opens next
-            let worked = match &e {
-                Event::Done(j) | Event::Stopped { job: j, .. } => Some(job_room(*j)),
-                Event::Back(_) => Some(Room::Portal),
-                _ => None,
-            };
-            if let (Some(r), false) = (worked, self.open()) {
-                self.room = r;
-            }
             match e {
                 Event::Paid(job) => paid = Some((job, paid.map_or(0, |p| p.1) + BEAT)),
                 Event::Stopped { job, secs, why } => {
@@ -966,8 +1045,6 @@ impl App {
                     let zone = ZONES[rep.zone as usize].name;
                     self.news(if rep.fled { format!("Fled from {zone}") } else { format!("Back from {zone} with {} loot", rep.loot.len()) }, t);
                     self.react(if rep.fled { Anim::Sad } else { Anim::Happy }, 2.0, t);
-                    self.m.x = self.art.spot(Room::Portal, false).x + 30.0;
-                    self.m.flip = true;
                     self.report = Some(rep);
                     self.confetti(a, 20);
                 }
@@ -1016,7 +1093,8 @@ impl App {
         }
         self.save.late = Some(old);
         (self.fight, self.report, self.incoming, self.pending, self.selected) = (None, None, None, None, None);
-        self.room = Room::Home;
+        self.loc = Loc::Home(self.save.id);
+        (self.m.path, self.m.then, self.m.goal) = (Vec::new(), Vec::new(), None);
         self.hatch_name = game::random_name(&mut self.rng);
         // no pet left to walk the desktop: the hatch screen takes over an open window, else it waits in the tray
         self.want_view = Some(if self.open() || self.tray.is_none() { View::Popover } else { View::Tray });
@@ -1090,7 +1168,7 @@ impl App {
             }
         }
         match (self.view, need) {
-            (View::Tray, Some(n)) if t > self.snooze && self.pet_room().is_some() => {
+            (View::Tray, Some(n)) if t > self.snooze && self.pet_loc().is_some() => {
                 self.set_view(ctx, View::Roam, None);
                 let line = *self.rng.pick(need_lines(n));
                 self.say_me(line, t);
@@ -1115,8 +1193,10 @@ impl App {
                     pet.inherit(old);
                 }
                 self.save.pet = Some(pet);
-                self.m.x = 100.0;
-                self.m.target_x = 100.0;
+                // out of the egg, right where it lay
+                self.loc = Loc::Home(self.save.id);
+                let home = self.art.place(self.loc);
+                self.m.pos = home.slots("egg").first().map_or(home.spawn(), |s| Pos2::from(*s));
                 let a = self.anchor();
                 self.confetti(a, 40);
                 self.burst(a, Fx::Star, 12, 160.0);
@@ -1127,39 +1207,20 @@ impl App {
             }
         }
 
-        // our pet's body
-        let job = self.save.pet.as_ref().and_then(|p| p.task).map(|t| t.job);
+        // our pet's body, and everyone else's walking
+        let job = self.job();
         if self.view == View::Roam {
             self.roam_step(ctx, job, dt, t);
-        } else if let Some(room) = self.pet_room().filter(|_| self.fight.is_none()) {
-            let slot = self.layout(room).0;
-            let target = match (slot, job) {
-                (Some(s), _) => s,
-                (None, Some(Job::Run)) => self.art.spot(Room::Gym, true),
-                (None, Some(j)) => self.art.spot(job_room(j), false),
-                (None, None) => {
-                    if t > self.m.wander_at {
-                        self.m.wander_at = t + 3.0 + self.rng.f32() as f64 * 6.0;
-                        if self.rng.chance(60) {
-                            self.m.target_x = 24.0 + self.rng.f32() * 152.0;
-                        }
-                    }
-                    pos2(self.m.target_x, FLOOR_Y)
+        } else if let Some(loc) = self.pet_loc().filter(|_| self.fight.is_none()) {
+            self.walk_step(loc, job, dt, t);
+        }
+        for p in self.peers.values_mut() {
+            p.moving = false;
+            if let Some(dx) = world::step(&mut p.pos, &mut p.path, WALK, dt) {
+                p.moving = true;
+                if dx.abs() > 0.01 {
+                    p.flip = dx < 0.0;
                 }
-            };
-            let dx = target.x - self.m.x;
-            self.m.moving = dx.abs() > 0.5 && t >= self.m.react_until;
-            if self.m.moving {
-                self.m.x += dx.signum() * (30.0 * dt).min(dx.abs());
-                self.m.flip = dx < 0.0;
-            }
-            if (target.y - self.m.y).abs() > 0.1 && dx.abs() < 3.0 {
-                if target.y < self.m.y - 2.0 {
-                    self.hop();
-                }
-                self.m.y = target.y;
-            } else if dx.abs() >= 3.0 {
-                self.m.y = FLOOR_Y;
             }
         }
         let happy = self.save.pet.as_ref().is_some_and(|p| p.mood > 60.0 && p.need().is_none());
@@ -1244,6 +1305,107 @@ impl App {
         self.fight_step(dt, t);
     }
 
+    /// Our pet getting around its place: to its job's spot, door by door towards the autopilot's goal,
+    /// or off for a little wander when left alone; then a step along the way, and arriving.
+    fn walk_step(&mut self, loc: Loc, job: Option<Job>, dt: f32, t: f64) {
+        if self.m.path.is_empty() {
+            if job.is_some() {
+                let spot = self.job_spots(loc).into_iter().find(|s| s.0 == self.save.id).map(|s| s.1);
+                if let Some(spot) = spot.filter(|s| s.distance(self.m.pos) > 1.0)
+                    && !self.walk(spot)
+                {
+                    self.m.pos = spot;
+                }
+            } else if let Some(goal) = self.m.goal {
+                self.head_for(goal, t);
+            } else if t > self.m.wander_at {
+                self.m.wander_at = t + 5.0 + self.rng.f32() as f64 * 7.0;
+                if t - self.m.last_click > 20.0 && self.rng.chance(60) {
+                    self.wander();
+                }
+            }
+        }
+        let going = !self.m.path.is_empty();
+        self.m.moving = false;
+        if t >= self.m.react_until {
+            let speed = if job == Some(Job::Run) { TROT } else { WALK };
+            if let Some(dx) = world::step(&mut self.m.pos, &mut self.m.path, speed, dt) {
+                self.m.moving = true;
+                if dx.abs() > 0.01 {
+                    self.m.flip = dx < 0.0;
+                }
+            }
+        }
+        if going && self.m.path.is_empty() {
+            self.arrived(t);
+        }
+    }
+
+    /// Sets our pet off towards `to` in its place and tells the LAN. False when there's no way there.
+    fn walk(&mut self, to: Pos2) -> bool {
+        let Some(loc) = self.pet_loc() else { return false };
+        let Some(path) = self.art.place(loc).path(self.m.pos, to) else { return false };
+        let end = path.last().copied().unwrap_or(to);
+        self.m.path = path;
+        if let Some(n) = &self.net {
+            n.broadcast(&Msg::Move { id: self.save.id, loc, from: [self.m.pos.x, self.m.pos.y], to: [end.x, end.y] });
+        }
+        true
+    }
+
+    /// A short stroll to somewhere open nearby (never through a door).
+    fn wander(&mut self) {
+        for _ in 0..8 {
+            let to = self.m.pos + vec2(self.rng.f32() - 0.5, self.rng.f32() - 0.5) * 8.0 * TILE;
+            let place = self.art.place(self.loc);
+            let open = place.open_at(to) && place.door_at(to).is_none();
+            if open && self.walk(to) {
+                return;
+            }
+        }
+    }
+
+    /// The autopilot's next leg: out to town, then in at `goal`'s door.
+    fn head_for(&mut self, goal: Loc, t: f64) {
+        if self.loc == goal {
+            self.m.goal = None;
+            return;
+        }
+        let key = if self.loc == Loc::Town { goal.key() } else { "town" };
+        let door = self.art.place(self.loc).door_to(key).map(|d| d.centre());
+        if !door.is_some_and(|d| self.walk(d)) {
+            self.m.goal = None;
+            self.say_me("I can't find the way...", t);
+        }
+    }
+
+    /// The end of a walk: through the door it stopped on, or on with what the walk was for.
+    fn arrived(&mut self, t: f64) {
+        let door = self.art.place(self.loc).door_at(self.m.pos).map(|d| (Loc::from_key(&d.to, self.save.id), Pos2::from(d.arrive)));
+        match door {
+            Some((Some(to), at)) => self.enter(to, at, t),
+            _ => self.due.append(&mut self.m.then),
+        }
+    }
+
+    /// Through a door: the screen cuts over to the place on the other side.
+    fn enter(&mut self, loc: Loc, at: Pos2, t: f64) {
+        self.loc = loc;
+        self.m.pos = at;
+        (self.m.path, self.m.then) = (Vec::new(), Vec::new());
+        if self.m.goal == Some(loc) {
+            self.m.goal = None;
+        }
+        self.m.wander_at = t + 3.0;
+        self.selected = None;
+        self.fx.clear();
+        self.floaters.clear();
+        self.cut = 1.0;
+        self.kick = 1.0;
+        self.last_hello = -10.0; // tell everyone right away
+        self.dirty = true;
+    }
+
     fn fight_step(&mut self, dt: f32, t: f64) {
         let Some(f) = &mut self.fight else { return };
         for i in 0..2 {
@@ -1308,22 +1470,19 @@ impl App {
             }
             Act::Tab(tab) => self.tab = tab,
             Act::Quit => self.quit(ctx),
-            Act::Go(r) => {
-                if r != self.room && self.fight.is_none() {
-                    let forward = (r as usize + 8 - self.room as usize) % 8 <= 4;
-                    let followed = self.pet_room() == Some(self.room);
-                    self.room = r;
-                    self.selected = None;
-                    self.cut = 1.0;
-                    self.kick = 1.0;
-                    if followed && self.pet_room() == Some(r) {
-                        // walk in from the side we came from
-                        self.m.x = if forward { -14.0 } else { 214.0 };
-                        self.m.y = FLOOR_Y;
-                        self.m.target_x = 50.0 + self.rng.f32() * 90.0;
-                        self.m.wander_at = t + 3.0;
-                    }
-                    self.last_hello = -10.0;
+            Act::Go(_) | Act::Walk(..) if self.fight.is_some() || self.pet_loc().is_none() => {}
+            Act::Go(_) | Act::Walk(..) if self.job().is_some() => self.say_me("I'm busy! Press Stop first.", t),
+            Act::Go(loc) => {
+                (self.m.goal, self.m.path, self.m.then) = (Some(loc), Vec::new(), Vec::new());
+                self.m.last_click = t;
+            }
+            Act::Walk(to, then) => {
+                self.m.goal = None;
+                self.m.last_click = t;
+                if self.walk(to) {
+                    self.m.then = then;
+                } else {
+                    self.say_me("I can't get there.", t);
                 }
             }
             Act::Select(id) => self.selected = id,
@@ -1515,12 +1674,12 @@ impl App {
                     return;
                 }
                 self.last_chat = t;
-                let room = self.view_room();
+                let loc = self.view_loc();
                 let name = pet.name.clone();
                 if let Some(n) = &self.net {
-                    n.broadcast(&Msg::Chat { id: self.save.id, name: name.clone(), room: room as u8, text: text.clone() });
+                    n.broadcast(&Msg::Chat { id: self.save.id, name: name.clone(), loc, text: text.clone() });
                 }
-                self.log(ChatLine { room: Some(room), name: Some(name), text: text.clone(), mine: true, at: t });
+                self.log(ChatLine { room: Some(loc), name: Some(name), text: text.clone(), mine: true, at: t });
                 let id = self.save.id;
                 self.say(id, text, t, 6.0);
             }
@@ -1552,7 +1711,7 @@ impl eframe::App for App {
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.track_window(&ctx, t);
         self.animate(&ctx, dt, t);
-        let mut acts = Vec::new();
+        let mut acts = std::mem::take(&mut self.due);
         self.keys(&ctx, &mut acts);
         if self.save.pet.is_none() {
             self.hatch_view(ui, t, &mut acts);

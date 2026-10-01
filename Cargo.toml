@@ -2,7 +2,7 @@
 name = "lanpet"
 # Bumping this and pushing to main publishes release v<version> (.github/workflows/release.yml),
 # which installed copies then update to.
-version = "0.1.8"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]

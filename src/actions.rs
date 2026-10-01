@@ -1,9 +1,9 @@
 //! What you can do right now: the popover's buttons, the expanded list, clickable furniture,
-//! and the one-line status under the room name.
+//! and the one-line status under the place's name.
 
-use crate::art::Room;
 use crate::game::{DAY, Item, Job, Need, Pet, Slot, Stage, ZONES, now};
-use crate::{Act, App, Tab, View, job_room, need_room};
+use crate::world::Loc;
+use crate::{Act, App, Tab, View};
 
 /// One thing you can do: a button in the popover, a row in the expanded list.
 pub(crate) struct Btn {
@@ -142,11 +142,13 @@ impl App {
             let left = mmss(task.end.saturating_sub(now()));
             return match task.job {
                 Job::Explore(z) => format!("{} is exploring {} · {left}", pet.name, ZONES[z as usize].name),
-                j if job_room(j) == self.room => format!("{} is {} · {left}", pet.name, j.label().to_lowercase()),
-                j => format!("{} is in the {} · {left}", pet.name, job_room(j).name()),
+                j => format!("{} is {} · {left}", pet.name, j.label().to_lowercase()),
             };
         }
-        let names: Vec<&str> = self.peers_in(self.room).map(|p| p.card.name.as_str()).collect();
+        if let Some(goal) = self.m.goal {
+            return format!("{} is on the way to {}", pet.name, if matches!(goal, Loc::Home(_)) { "home".to_string() } else { format!("the {}", goal.name()) });
+        }
+        let names: Vec<&str> = self.peers_in(self.view_loc()).map(|p| p.card.name.as_str()).collect();
         match names.as_slice() {
             [] => format!("{} is hanging out", pet.name),
             [a] => format!("{a} is here"),
@@ -168,7 +170,7 @@ impl App {
                 let mins = task.end.saturating_sub(now()).div_ceil(60);
                 format!("LanPet · {} · {} ({mins} min left)", pet.name, task.job.label())
             }
-            None => format!("LanPet · {} is in the {}", pet.name, self.room.name()),
+            None => format!("LanPet · {} is {}", pet.name, self.loc.at()),
         }
     }
 
@@ -202,7 +204,7 @@ impl App {
             let name = self.peers.get(&p.peer).map_or("them", |x| x.card.name.as_str());
             v.push(Btn::new(format!("Waiting for {name}"), format!("{}s to accept", (p.until - t).max(0.0) as u32), "…", vec![]).off_if(true));
         }
-        let can_fight = self.pending.is_none() && self.pet_room().is_some();
+        let can_fight = self.pending.is_none() && self.pet_loc().is_some();
         if let Some(peer) = self.selected.and_then(|id| self.peers.get(&id)) {
             let (id, c) = (peer.card.id, &peer.card);
             v.push(Btn::new(format!("Battle {}", c.name), format!("Lv {} {} · {}W / {}L", c.level, c.species.name(), c.wins, c.losses), "Battle", vec![Act::Challenge(id)]).off_if(!can_fight));
@@ -221,14 +223,17 @@ impl App {
             Some(Need::Sick) if pet.bag.contains_key(&Item::Medicine) => {
                 v.push(Btn::new("Give medicine", "Cures the sickness", "Give", vec![Act::Use(Item::Medicine)]).item(Item::Medicine));
             }
-            Some(n) if need_room(n) != self.room => {
-                let room = need_room(n);
-                v.push(Btn::new(format!("{}!", n.label()), format!("To the {}", room.name()), "Go", vec![Act::Go(room)]));
+            Some(n) if self.need_loc(n) != self.view_loc() => {
+                let to = match self.need_loc(n) {
+                    Loc::Home(_) => "Head home".to_string(),
+                    l => format!("To the {}", l.name()),
+                };
+                v.push(Btn::new(format!("{}!", n.label()), to, "Go", vec![Act::Go(self.need_loc(n))]));
             }
             _ => {}
         }
         let busy = pet.task.is_some();
-        let job_here = pet.task.filter(|t| !matches!(t.job, Job::Explore(_)) && job_room(t.job) == self.room);
+        let job_here = pet.task.filter(|t| !matches!(t.job, Job::Explore(_)) && self.job_loc(t.job) == self.view_loc());
         if let Some(task) = job_here {
             let (xp, gain) = earned(pet, task.job, now().saturating_sub(task.start));
             let so_far = if xp.is_empty() { format!("{gain} so far") } else { format!("{gain} · {xp} so far") };
@@ -238,24 +243,30 @@ impl App {
             let sub = if busy { format!("{} is busy", pet.name) } else { sub.to_string() };
             Btn::new(job_verb(j), sub, "Start", vec![Act::Start(j)]).off_if(busy)
         };
-        match self.room {
-            Room::Home => {
+        match self.view_loc() {
+            Loc::Town => {
+                for loc in Loc::buildings(self.save.id) {
+                    let sub = match loc {
+                        Loc::Home(_) => "Sleep, eat and drink",
+                        Loc::Library => "Study · +Mana",
+                        Loc::Gym => "Lift and run · +Str, +HP",
+                        Loc::Shop => "Food, gear and hats",
+                        Loc::Portal => "Expeditions and loot",
+                        _ => "Battle coworkers' pets",
+                    };
+                    v.push(Btn::new(loc.name(), sub, "Go", vec![Act::Go(loc)]));
+                }
+            }
+            Loc::Home(_) => {
                 if let Some((ver, _)) = &self.update.ready {
                     let sub = if self.update.installing { "Installing…".to_string() } else { format!("{ver} is ready · LanPet restarts") };
                     v.push(Btn::new("Update LanPet", sub, "Update", vec![Act::Update]).off_if(self.update.installing));
                 }
-                let n: u32 = pet.bag.values().sum();
-                v.push(Btn::new("Pet", format!("{} loves it · +Mood", pet.name), "Pet", vec![Act::PetIt]));
-                v.push(Btn::new("Bag", format!("{n} item{}", if n == 1 { "" } else { "s" }), "Open", vec![Act::View(View::Expanded), Act::Tab(Tab::Bag)]));
-            }
-            Room::Bedroom if job_here.is_none() => v.push(job(Job::Sleep, "20 min · +Energy, heals HP")),
-            Room::Library if job_here.is_none() => v.push(job(Job::Study, "10 min · +3 Mana")),
-            Room::Gym if job_here.is_none() => {
-                v.push(job(Job::Lift, "10 min · +3 Str"));
-                v.push(job(Job::Run, "10 min · +8 HP, +Spd"));
-            }
-            Room::Kitchen => {
                 let first = v.len();
+                if job_here.is_none() {
+                    v.push(job(Job::Sleep, "20 min · +Energy, heals HP"));
+                }
+                v.push(Btn::new("Water", "+40 Water · free", "Drink", vec![Act::Drink]));
                 let food: Vec<(Item, u32)> = pet.bag.iter().filter(|(i, _)| matches!(i.info().slot, Slot::Food | Slot::Drink)).map(|(&i, &n)| (i, n)).collect();
                 for &(it, n) in &food {
                     let verb = if it.info().slot == Slot::Drink { "Drink" } else { "Eat" };
@@ -265,11 +276,30 @@ impl App {
                     let price = Item::Apple.info().price;
                     v.push(Btn::new("Quick apple", format!("Buy & eat · {price} gold"), format!("{price} g"), vec![Act::Buy(Item::Apple), Act::Use(Item::Apple)]).item(Item::Apple).off_if(pet.gold < price));
                 }
-                // water's free: first when thirst is the bigger need, else right after the first bite
-                let at = if pet.thirst <= pet.hunger { first } else { (first + 1).min(v.len()) };
-                v.insert(at, Btn::new("Water", "+40 Water · free", "Drink", vec![Act::Drink]));
+                let n: u32 = pet.bag.values().sum();
+                v.push(Btn::new("Pet", format!("{} loves it · +Mood", pet.name), "Pet", vec![Act::PetIt]));
+                v.push(Btn::new("Bag", format!("{n} item{}", if n == 1 { "" } else { "s" }), "Open", vec![Act::View(View::Expanded), Act::Tab(Tab::Bag)]));
+                // what the pet needs most goes first
+                let urgent = |b: &Btn| {
+                    b.acts.iter().any(|a| match pet.need() {
+                        Some(Need::Tired) => matches!(a, Act::Start(Job::Sleep)),
+                        Some(Need::Thirsty) => matches!(a, Act::Drink),
+                        Some(Need::Hungry) => matches!(a, Act::Use(i) if i.info().slot == Slot::Food),
+                        Some(Need::Sad) => matches!(a, Act::PetIt),
+                        _ => false,
+                    })
+                };
+                if let Some(i) = v[first..].iter().position(urgent) {
+                    let b = v.remove(first + i);
+                    v.insert(first, b);
+                }
             }
-            Room::Portal => match pet.task {
+            Loc::Library if job_here.is_none() => v.push(job(Job::Study, "10 min · +3 Mana")),
+            Loc::Gym if job_here.is_none() => {
+                v.push(job(Job::Lift, "10 min · +3 Str"));
+                v.push(job(Job::Run, "10 min · +8 HP, +Spd"));
+            }
+            Loc::Portal => match pet.task {
                 Some(task) if matches!(task.job, Job::Explore(_)) => {
                     v.push(Btn::new(task.job.label(), "Out adventuring", "Away", vec![]).timer(task.end).off_if(true));
                 }
@@ -289,7 +319,7 @@ impl App {
                     }
                 }
             },
-            Room::Arena => {
+            Loc::Arena => {
                 if let Some(e) = &self.net_err {
                     v.push(Btn::new("LAN offline", e.clone(), "…", vec![]).off_if(true));
                 } else if self.peers.is_empty() {
@@ -297,14 +327,14 @@ impl App {
                 }
                 for peer in self.peers.values() {
                     let c = &peer.card;
-                    let at = c.room.map_or("away", |r| Room::ALL[r as usize].name());
-                    v.push(Btn::new(format!("Battle {}", c.name), format!("Lv {} {} · in {at}", c.level, c.species.name()), "Battle", vec![Act::Challenge(c.id)]).off_if(!can_fight));
+                    let at = c.loc.map_or("away".to_string(), |l| l.at());
+                    v.push(Btn::new(format!("Battle {}", c.name), format!("Lv {} {} · {at}", c.level, c.species.name()), "Battle", vec![Act::Challenge(c.id)]).off_if(!can_fight));
                     if full {
                         v.push(Btn::new(format!("Wave at {}", c.name), "Say hi across the LAN", "Wave", vec![Act::Wave(c.id)]));
                     }
                 }
             }
-            Room::Shop => {
+            Loc::Shop => {
                 let featured = if pet.sick { [Item::Medicine, Item::Coffee, Item::Cake] } else { [Item::Coffee, Item::Cake, Item::Potion] };
                 let items: Vec<Item> = if full { Item::ALL.into_iter().filter(|i| i.info().price > 0).collect() } else { featured.to_vec() };
                 for it in items {
@@ -337,7 +367,13 @@ impl App {
                 None => ("Nobody to battle yet".into(), vec![]),
             },
             "browse" => ("See everything for sale".into(), vec![Act::View(View::Expanded), Act::Tab(Tab::Here)]),
-            _ => (String::new(), vec![]),
+            // a building: walking up to its door goes in
+            a => match a.strip_prefix("go:").and_then(|k| Loc::from_key(k, self.save.id)) {
+                Some(Loc::Town) => ("Out to town".into(), vec![]),
+                Some(Loc::Home(_)) => ("Go home".into(), vec![]),
+                Some(l) => (format!("Enter the {}", l.name()), vec![]),
+                None => (String::new(), vec![]),
+            },
         }
     }
 }

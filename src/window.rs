@@ -6,8 +6,10 @@ use crate::tray::TrayMsg;
 use crate::{App, ChatLine, View};
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, WindowLevel, pos2, vec2};
 
-pub const POPOVER: Vec2 = Vec2::new(440.0, 354.0);
-pub const EXPANDED: Vec2 = Vec2::new(740.0, 438.0);
+pub const POPOVER: Vec2 = Vec2::new(440.0, 426.0);
+/// The expanded view opens this big and can be dragged bigger (down to EXPANDED_MIN).
+pub const EXPANDED: Vec2 = Vec2::new(900.0, 560.0);
+pub const EXPANDED_MIN: Vec2 = Vec2::new(740.0, 438.0);
 pub const HATCH: Vec2 = Vec2::new(440.0, 460.0);
 /// The desktop pet's sprite scale (points per sprite pixel).
 pub const ROAM_SCALE: f32 = 1.5;
@@ -72,7 +74,7 @@ impl App {
         } else {
             match self.view {
                 View::Roam => ROAM,
-                View::Expanded => EXPANDED,
+                View::Expanded => self.exp_size,
                 _ => POPOVER,
             }
         }
@@ -100,7 +102,6 @@ impl App {
             return;
         }
         if self.open() && !was_open {
-            self.room = self.pet_room().unwrap_or(self.room);
             self.attention = false;
             self.shown_at = t;
             self.had_focus = false;
@@ -133,6 +134,10 @@ impl App {
             }
         };
         self.win_rect = Rect::from_min_size(pos, size);
+        // only the expanded view can be resized (by its corner grip)
+        let expanded = v == View::Expanded;
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(if expanded { EXPANDED_MIN } else { Vec2::ZERO }));
+        ctx.send_viewport_cmd(ViewportCommand::Resizable(expanded));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         if from == View::Tray {
@@ -149,7 +154,7 @@ impl App {
     /// desktop pet: what arrived since the window closed pops up for a few seconds, and resting the
     /// pointer on the pet brings back the recent lines until a moment after it leaves.
     pub(crate) fn roam_lines(&self, t: f64) -> impl Iterator<Item = (&ChatLine, f32)> {
-        let room = self.pet_room();
+        let room = self.pet_loc();
         self.chat
             .iter()
             .rev()
@@ -288,6 +293,10 @@ impl App {
         }
         if let Some(r) = outer {
             self.win_rect = r;
+            // a size the expanded view was dragged to sticks for this session
+            if self.view == View::Expanded && r.width() >= EXPANDED_MIN.x && r.height() >= EXPANDED_MIN.y {
+                self.exp_size = r.size();
+            }
         }
         if ctx.cumulative_frame_nr() == 1 {
             // eframe shows the window after its first frame; X11 ignored "always on top" while it was still hidden

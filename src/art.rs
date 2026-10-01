@@ -1,6 +1,7 @@
 //! Pixel art made by `tools/gen_assets.py`, embedded in the binary and drawn with nearest filtering.
 
 use crate::game::{Item, Species, Stage};
+use crate::world::{Loc, Place};
 use eframe::egui::{Color32, ColorImage, Context, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2, pos2, vec2};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -27,45 +28,11 @@ pub enum Anim {
 }
 const ANIM_NAMES: [&str; 15] = ["idle", "walk", "run", "sleep", "eat", "happy", "train", "study", "attack", "hurt", "sad", "blink", "egg", "sick", "ghost"];
 
-/// Rooms, in `ROOMS` order from the generator.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Room {
-    Home,
-    Bedroom,
-    Kitchen,
-    Library,
-    Gym,
-    Portal,
-    Arena,
-    Shop,
-}
-
-impl Room {
-    pub const ALL: [Room; 8] = [Room::Home, Room::Bedroom, Room::Kitchen, Room::Library, Room::Gym, Room::Portal, Room::Arena, Room::Shop];
-    pub fn name(self) -> &'static str {
-        ["Home", "Bedroom", "Kitchen", "Library", "Gym", "Portal", "Arena", "Shop"][self as usize]
-    }
-}
-
 #[derive(Deserialize)]
 struct StateMeta {
     name: String,
     frames: usize,
     fps: f64,
-}
-
-#[derive(Deserialize)]
-struct HotMeta {
-    rect: [f32; 4],
-    act: String,
-}
-
-#[derive(Deserialize)]
-struct RoomMeta {
-    spot: [f32; 2],
-    spot2: Option<[f32; 2]>,
-    slots: Vec<[f32; 2]>,
-    hot: Vec<HotMeta>,
 }
 
 #[derive(Deserialize)]
@@ -81,8 +48,9 @@ struct Meta {
     items: Vec<Item>,
     item_size: f32,
     need_size: f32,
-    room_size: [f32; 2],
-    rooms: Vec<RoomMeta>,
+    places: Vec<Place>,
+    /// Prop sprites in props.png: [x, y, w, h], drawn bottom-centre on their feet.
+    sprites: Vec<[f32; 4]>,
 }
 
 pub struct Art {
@@ -91,7 +59,9 @@ pub struct Art {
     hats: TextureHandle,
     items: TextureHandle,
     needs: TextureHandle,
-    rooms: TextureHandle,
+    ground: TextureHandle,
+    props: TextureHandle,
+    minimaps: TextureHandle,
 }
 
 pub struct PetDraw {
@@ -110,6 +80,10 @@ pub struct PetDraw {
 }
 
 fn texture(ctx: &Context, name: &str, png: &[u8], white: bool) -> TextureHandle {
+    load(ctx, name, png, white, TextureOptions::NEAREST)
+}
+
+fn load(ctx: &Context, name: &str, png: &[u8], white: bool, filter: TextureOptions) -> TextureHandle {
     let img = image::load_from_memory(png).expect("embedded asset is a valid png").to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let mut px = img.into_raw();
@@ -118,7 +92,7 @@ fn texture(ctx: &Context, name: &str, png: &[u8], white: bool) -> TextureHandle 
             p[..3].fill(255);
         }
     }
-    ctx.load_texture(name, ColorImage::from_rgba_unmultiplied(size, &px), TextureOptions::NEAREST)
+    ctx.load_texture(name, ColorImage::from_rgba_unmultiplied(size, &px), filter)
 }
 
 fn uv(tex: &TextureHandle, px: Rect) -> Rect {
@@ -131,6 +105,9 @@ impl Art {
         let meta: Meta = serde_json::from_str(include_str!("../assets/meta.json")).expect("assets/meta.json matches art.rs");
         assert!(meta.states.iter().map(|s| s.name.as_str()).eq(ANIM_NAMES), "regenerate assets: animation rows changed");
         assert!(meta.stages == Stage::ALL, "regenerate assets: life stages changed");
+        for l in [Loc::Town, Loc::Library, Loc::Gym, Loc::Portal, Loc::Arena, Loc::Shop, Loc::Home(0)] {
+            assert!(meta.places.iter().any(|p| p.key == l.key()), "regenerate assets: no place {}", l.key());
+        }
         let sheets: [&[u8]; 5] = [
             include_bytes!("../assets/dino.png"),
             include_bytes!("../assets/lizard.png"),
@@ -148,7 +125,10 @@ impl Art {
             hats: texture(ctx, "hats", include_bytes!("../assets/hats.png"), false),
             items: texture(ctx, "items", include_bytes!("../assets/items.png"), false),
             needs: texture(ctx, "needs", include_bytes!("../assets/needs.png"), false),
-            rooms: texture(ctx, "rooms", include_bytes!("../assets/rooms.png"), false),
+            ground: texture(ctx, "places", include_bytes!("../assets/places.png"), false),
+            props: texture(ctx, "props", include_bytes!("../assets/props.png"), false),
+            // already shrunk smoothly, and drawn at whatever size fits
+            minimaps: load(ctx, "minimaps", include_bytes!("../assets/minimaps.png"), false, TextureOptions::LINEAR),
             meta,
         }
     }
@@ -215,31 +195,28 @@ impl Art {
         p.image(self.needs.id(), Rect::from_center_size(at, Vec2::splat(s * scale)), uv(&self.needs, src), Color32::WHITE);
     }
 
-    pub fn room_size(&self) -> Vec2 {
-        Vec2::from(self.meta.room_size)
+    pub fn place(&self, loc: Loc) -> &Place {
+        self.meta.places.iter().find(|p| p.key == loc.key()).expect("checked in Art::load")
     }
 
-    /// Paint the part `src` (room pixels) of a room into `rect`.
-    pub fn room(&self, p: &Painter, room: Room, rect: Rect, src: Rect, tint: Color32) {
-        let src = src.translate(vec2(0.0, room as usize as f32 * self.meta.room_size[1]));
-        p.image(self.rooms.id(), rect, uv(&self.rooms, src), tint);
+    /// Paints the part `src` (place pixels) of a place's ground into `rect`.
+    pub fn ground(&self, p: &Painter, place: &Place, rect: Rect, src: Rect) {
+        let [x, y, _, _] = place.img;
+        p.image(self.ground.id(), rect, uv(&self.ground, src.translate(vec2(x, y))), Color32::WHITE);
     }
 
-    /// Where the room's activity happens (room pixels). `second` picks the alternate spot (treadmill, arena foe).
-    pub fn spot(&self, room: Room, second: bool) -> Pos2 {
-        let m = &self.meta.rooms[room as usize];
-        let s = if second { m.spot2.unwrap_or(m.spot) } else { m.spot };
-        pos2(s[0], s[1])
+    /// The whole place, small, into `rect`.
+    pub fn minimap(&self, p: &Painter, place: &Place, rect: Rect) {
+        let [x, y, w, h] = place.mini;
+        p.image(self.minimaps.id(), rect, uv(&self.minimaps, Rect::from_min_size(pos2(x, y), vec2(w, h))), Color32::WHITE);
     }
 
-    /// Shared-room slot positions (room pixels).
-    pub fn slots(&self, room: Room) -> impl Iterator<Item = Pos2> + '_ {
-        self.meta.rooms[room as usize].slots.iter().map(|s| pos2(s[0], s[1]))
-    }
-
-    /// Clickable furniture (room pixels) and the action name it starts.
-    pub fn hot(&self, room: Room) -> impl Iterator<Item = (Rect, &str)> + '_ {
-        self.meta.rooms[room as usize].hot.iter().map(|h| (Rect::from_min_size(pos2(h.rect[0], h.rect[1]), vec2(h.rect[2], h.rect[3])), h.act.as_str()))
+    /// Prop sprite `i` standing on `feet` (screen) at `scale`; returns where it was drawn.
+    pub fn prop(&self, p: &Painter, i: usize, feet: Pos2, scale: f32, tint: Color32) -> Rect {
+        let [x, y, w, h] = self.meta.sprites[i];
+        let rect = Rect::from_min_size(pos2(feet.x - w * scale / 2.0, feet.y - h * scale), vec2(w, h) * scale);
+        p.image(self.props.id(), rect, uv(&self.props, Rect::from_min_size(pos2(x, y), vec2(w, h))), tint);
+        rect
     }
 }
 

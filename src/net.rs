@@ -1,8 +1,9 @@
-//! LAN play over UDP broadcast. Every pet shouts a `Hello` every couple of seconds;
-//! challenges, waves and gifts go straight back to the sender's address.
-//! Battles are simulated locally on both sides from the same seed + stat snapshots.
+//! LAN play over UDP broadcast. Every pet shouts a `Hello` every couple of seconds and a `Move`
+//! whenever it sets off somewhere; challenges, waves and gifts go straight back to the sender's
+//! address. Battles are simulated locally on both sides from the same seed + stat snapshots.
 
 use crate::game::{Fighter, Item, Job, Species, Stage, ZONES, clean};
+use crate::world::Loc;
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -10,7 +11,13 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 pub const PORT: u16 = 47474;
-const MAGIC: &[u8] = b"LP1";
+/// LP2: the walkable world (pets have a place and a position). LP1 pets are ignored.
+const MAGIC: &[u8] = b"LP2";
+
+/// A place position from the network: finite and roughly on the map (the app clamps it to the place).
+fn sane(p: [f32; 2]) -> [f32; 2] {
+    p.map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 })
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Card {
@@ -26,8 +33,10 @@ pub struct Card {
     pub wins: u32,
     pub losses: u32,
     pub fighter: Fighter,
-    /// Room the pet is standing in (`art::Room` index); None while away on an expedition.
-    pub room: Option<u8>,
+    /// Where the pet is; None while away on an expedition.
+    pub loc: Option<Loc>,
+    /// Its feet in that place (pixels).
+    pub pos: [f32; 2],
     pub job: Option<Job>,
 }
 
@@ -36,7 +45,7 @@ impl Card {
         self.name = clean(&self.name, 16);
         self.status = clean(&self.status, 40);
         self.level = self.level.clamp(1, 999);
-        self.room = self.room.filter(|&r| r < 8);
+        self.pos = sane(self.pos);
         if let Some(Job::Explore(z)) = self.job {
             if z as usize >= ZONES.len() {
                 self.job = None;
@@ -55,8 +64,10 @@ pub enum Msg {
     Decline { battle: u64, why: String },
     Wave { from: String },
     Gift { from: String, item: Item },
-    /// Room chat; everyone hears it, only people viewing `room` show it.
-    Chat { id: u64, name: String, room: u8, text: String },
+    /// Chat in a place; everyone hears it, only pets in `loc` show it.
+    Chat { id: u64, name: String, loc: Loc, text: String },
+    /// Pet `id` set off from `from` to `to` in `loc`; everyone walks it there the same way.
+    Move { id: u64, loc: Loc, from: [f32; 2], to: [f32; 2] },
 }
 
 impl Msg {
@@ -65,13 +76,14 @@ impl Msg {
             Msg::Hello { card } | Msg::Challenge { card, .. } | Msg::Accept { card, .. } => card.sanitize(),
             Msg::Decline { why, .. } => *why = clean(why, 60),
             Msg::Wave { from } | Msg::Gift { from, .. } => *from = clean(from, 16),
-            Msg::Chat { name, room, text, .. } => {
+            Msg::Chat { name, text, .. } => {
                 *name = clean(name, 16);
                 *text = clean(text, 120);
-                if *room >= 8 || text.is_empty() {
+                if text.is_empty() {
                     return None;
                 }
             }
+            Msg::Move { from, to, .. } => (*from, *to) = (sane(*from), sane(*to)),
         }
         Some(self)
     }
@@ -157,7 +169,8 @@ mod tests {
             wins: 0,
             losses: 0,
             fighter: p.fighter(true),
-            room: Some(4),
+            loc: Some(Loc::Gym),
+            pos: [40.0, 50.0],
             job: None,
         }
     }
@@ -165,13 +178,19 @@ mod tests {
     #[test]
     fn rejects_junk_and_clamps_hostile_cards() {
         assert!(decode(b"hello").is_none());
-        assert!(decode(b"LP1{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
+        assert!(decode(b"LP2{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
+        assert!(decode(b"LP2{\"t\":\"Chat\",\"id\":1,\"name\":\"x\",\"loc\":\"Moon\",\"text\":\"hi\"}").is_none());
         let mut c = card(1);
         c.fighter.str = i32::MAX;
         c.name = "a\u{7}very long name that goes on".into();
+        c.pos = [-3.0, 9999.0];
         let Some(Msg::Hello { card }) = decode(&encode(&Msg::Hello { card: c })) else { panic!() };
         assert_eq!(card.fighter.str, 100_000);
         assert!(card.name.starts_with("avery long") && card.name.chars().count() <= 16);
+        assert_eq!(card.pos, [0.0, 4096.0]);
+        let m = Msg::Move { id: 1, loc: Loc::Home(9), from: [1e9, 5.0], to: [3.0, 4.0] };
+        let Some(Msg::Move { loc, from, .. }) = decode(&encode(&m)) else { panic!() };
+        assert_eq!((loc, from), (Loc::Home(9), [4096.0, 5.0]));
     }
 
     #[test]

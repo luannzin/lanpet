@@ -2,7 +2,8 @@
 
 A tiny pixel pet that lives on your desktop. It studies, lifts, runs, sleeps and explores while you
 work (and keeps going while the app is closed), then hangs out with your coworkers' pets over the LAN:
-pets in the same room see each other, chat, wave, trade gifts and battle.
+pets walk around the same little island town, see each other in the same place, chat, wave, trade
+gifts and battle.
 
 ## Install
 
@@ -37,11 +38,15 @@ LAN play: be on the same Wi-Fi/network and click **Allow** on the first-run netw
 
 ## Playing
 
-- Shrink the window (🗕) and the pet sits in a small widget above your taskbar. Drag it anywhere,
-  double-click to open, right-click to quit.
-- Rooms are where things happen: Library (study), Gym (weights, treadmill), Bedroom (sleep),
-  Kitchen (feed), Portal (expeditions), Arena (battles), Shop.
-- Click a coworker's pet to battle, wave or send a gift. Room chat reaches pets in the same room.
+- Click the tray icon to open LanPet. Close it and the pet hides in the tray, or (paw button) walks
+  along the bottom of your screen.
+- The world is a top-down town. Click anywhere and your pet walks there; click a building to walk in,
+  and the doormat to walk back out. Your coworkers' pets walk around it too.
+- Places are where things happen: Home (sleep, food, water), Library (study), Gym (weights,
+  treadmill), Portal (expeditions), Arena (battles), Shop. Click furniture to use it, or use the
+  buttons. In town, the buttons walk your pet to any building.
+- Click a coworker's pet to battle, wave or send a gift. Chat reaches the pets in the same place.
+- The expanded view can be made bigger by dragging its bottom-right corner.
 
 The save lives in `~/.local/share/lanpet/` (Linux), `~/Library/Application Support/lanpet/` (macOS)
 or `%APPDATA%\lanpet\` (Windows).

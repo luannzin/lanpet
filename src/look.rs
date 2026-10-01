@@ -170,15 +170,6 @@ pub fn text1(p: &Painter, anchor: Pos2, align: Align2, text: &str, font: FontId,
     r
 }
 
-/// Pixel arrow (◀ / ▶) made of stepped 2px columns.
-pub fn arrow(p: &Painter, c: Pos2, dir: f32, color: Color32) {
-    for k in 0..6 {
-        let h = 2.0 + k as f32 * 2.0;
-        let x = c.x + dir * (5.0 - k as f32 * 2.0) - 1.0;
-        p.rect_filled(Rect::from_min_size(pos2(x, c.y - h / 2.0), vec2(2.0, h)), 0.0, color);
-    }
-}
-
 /// Four corner brackets; with `inward` a dot sits inside each, pointing the window smaller.
 pub fn expand_icon(p: &Painter, c: Pos2, inward: bool) {
     for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
