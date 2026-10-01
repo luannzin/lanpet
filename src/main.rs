@@ -27,7 +27,7 @@ std::arch::global_asm!(
     ".symver hypot, hypot@GLIBC_2.2.5",
 );
 
-use art::{Anim, Art, assign_slots};
+use art::{Anim, Art};
 use eframe::egui::{self, Color32, Pos2, Rect, Ui, Vec2, pos2, vec2};
 use game::{BEAT, DAY, Event, Fighter, Furni, Hit, HitKind, Item, Job, Need, Report, Rng, Save, Slot, Species, Stage, ZONES, clean, now};
 use look::{AQUA, BLUE, DIM, GOLD, LEAF, PINK, RED, VIOLET};
@@ -608,37 +608,31 @@ impl App {
     /// depend on who's online: a floor's doors open into its residents' homes, and a home's front
     /// door onto its floor (or the lobby, once its owner has gone offline).
     fn through(&self, d: &world::Door) -> Option<(Loc, Pos2)> {
-        let lift = |l: Loc| self.world.place(l).slots("lift").first().map_or(self.world.place(l).spawn(), |s| Pos2::from(*s));
         match (d.to.as_str(), self.loc) {
             ("floor", Loc::Home(owner)) => Some(match self.apartment(owner) {
-                Some((floor, door)) => {
-                    let place = self.world.place(Loc::Floor(floor));
-                    (Loc::Floor(floor), place.slots("apt").get(door).map_or(place.spawn(), |s| Pos2::from(*s)))
-                }
-                None => (Loc::Lobby, lift(Loc::Lobby)),
+                Some((floor, door)) => (Loc::Floor(floor), self.world.place(Loc::Floor(floor)).spot("apt", door)),
+                None => (Loc::Lobby, self.world.place(Loc::Lobby).spot("lift", 0)),
             }),
             (key, Loc::Floor(floor)) if key.starts_with("apt") => {
                 let owner = self.resident(floor, key[3..].parse().ok()?)?;
                 Some((Loc::Home(owner), Pos2::from(d.arrive)))
             }
-            (key, _) => Loc::from_key(key, self.save.id).map(|l| (l, Pos2::from(d.arrive))),
+            (key, _) => Loc::from_key(key).map(|l| (l, Pos2::from(d.arrive))),
         }
     }
 
-    /// Where the pets working here stand: each job's spots (desks, treadmills...) shared out the
-    /// same way on every LAN client.
+    /// Where the pets working here stand: each job's spots (desks, treadmills...) handed out in id
+    /// order, so every LAN client lays them out the same; pets past the last spot work where they are.
     fn job_spots(&self, loc: Loc) -> Vec<(u64, Pos2)> {
         let place = self.world.place(loc);
         let mut out = Vec::new();
         for key in ["study", "lift", "run", "sleep"] {
-            let mut pets: Vec<(u64, Option<usize>)> = self.peers_in(loc).filter(|p| p.card.job.map(job_key) == Some(key)).map(|p| (p.card.id, None)).collect();
+            let mut ids: Vec<u64> = self.peers_in(loc).filter(|p| p.card.job.map(job_key) == Some(key)).map(|p| p.card.id).collect();
             if self.pet_loc() == Some(loc) && self.job().map(job_key) == Some(key) {
-                pets.push((self.save.id, None));
+                ids.push(self.save.id);
             }
-            let spots = place.slots(key);
-            for (&(id, _), s) in pets.iter().zip(assign_slots(&pets, spots.len())) {
-                out.extend(s.map(|s| (id, Pos2::from(spots[s]))));
-            }
+            ids.sort_unstable();
+            out.extend(ids.into_iter().zip(place.slots(key)).map(|(id, s)| (id, Pos2::from(*s))));
         }
         out
     }
@@ -692,7 +686,6 @@ impl App {
     /// Everyone to draw in `loc`, feet in place pixels.
     fn bodies(&self, loc: Loc, t: f64) -> Vec<Body> {
         let place = self.world.place(loc);
-        let spot = |key: &str, i: usize| place.slots(key).get(i).map_or(place.spawn(), |s| Pos2::from(*s));
         let mut v = Vec::new();
         if let (Some(f), Loc::Arena) = (&self.fight, loc) {
             for i in 0..2 {
@@ -712,7 +705,7 @@ impl App {
                     hat: f.hats[i],
                     anim,
                     frame: self.art.frame(anim, t + i as f64 * 0.37),
-                    feet: spot("fight", if left { 0 } else { 1 }) + vec2(dir * f.lunge[i] * 24.0, 0.0),
+                    feet: place.spot("fight", if left { 0 } else { 1 }) + vec2(dir * f.lunge[i] * 24.0, 0.0),
                     squash: Vec2::splat(1.0),
                     flash: f.flash[i],
                     flip: !left,
@@ -729,7 +722,7 @@ impl App {
                     None => ((t * 1.2) as usize % 2, 0.0),
                 };
                 let wob = (t as f32 * 40.0).sin() * shake;
-                let at = spot("egg", 0);
+                let at = place.spot("egg", 0);
                 let egg = Body {
                     id: 0,
                     species: Species::ALL[self.hatch_species],
@@ -795,7 +788,7 @@ impl App {
             }
         }
         if self.save.pet.is_none() {
-            return place.slots("egg").first().map_or(place.spawn(), |s| Pos2::from(*s));
+            return place.spot("egg", 0);
         }
         if loc == self.loc { self.m.pos } else { place.spawn() }
     }
@@ -1316,8 +1309,7 @@ impl App {
                 self.save.pet = Some(pet);
                 // out of the egg, right where it lay
                 self.loc = Loc::Home(self.save.id);
-                let home = self.world.place(self.loc);
-                self.m.pos = home.slots("egg").first().map_or(home.spawn(), |s| Pos2::from(*s));
+                self.m.pos = self.world.place(self.loc).spot("egg", 0);
                 let a = self.anchor();
                 self.confetti(a, 40);
                 self.burst(a, Fx::Star, 12, 160.0);
@@ -1626,8 +1618,7 @@ impl App {
             Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.fight.is_some() || self.pet_loc().is_none() => {}
             Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.job().is_some() => self.say_me("I'm busy! Press Stop first.", t),
             Act::Ride(to) => {
-                let place = self.world.place(to);
-                let at = place.slots("lift").first().map_or(place.spawn(), |s| Pos2::from(*s));
+                let at = self.world.place(to).spot("lift", 0);
                 self.enter(to, at, t);
             }
             Act::Go(loc) => {

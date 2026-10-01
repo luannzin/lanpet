@@ -405,17 +405,18 @@ impl Layout {
 
     /// Takes one `f` out of storage.
     pub fn unstore(&mut self, f: Furni) -> bool {
-        match self.stored.get_mut(&f) {
-            Some(n) if *n > 0 => {
-                *n -= 1;
-                if *n == 0 {
-                    self.stored.remove(&f);
-                }
-                true
-            }
-            _ => false,
-        }
+        take_one(&mut self.stored, f)
     }
+}
+
+/// One `k` out of a pile of counts (a bag, a storeroom); false when there's none.
+fn take_one<K: Ord>(pile: &mut BTreeMap<K, u32>, k: K) -> bool {
+    match pile.get_mut(&k) {
+        Some(n) if *n > 1 => *n -= 1,
+        Some(_) => drop(pile.remove(&k)),
+        None => return false,
+    }
+    true
 }
 
 // ------------------------------------------------------------------------------------------ jobs & zones
@@ -1060,16 +1061,7 @@ impl Pet {
         *self.bag.entry(it).or_default() += n;
     }
     pub fn take(&mut self, it: Item) -> bool {
-        match self.bag.get_mut(&it) {
-            Some(n) if *n > 0 => {
-                *n -= 1;
-                if *n == 0 {
-                    self.bag.remove(&it);
-                }
-                true
-            }
-            _ => false,
-        }
+        take_one(&mut self.bag, it)
     }
 
     pub fn slot_mut(&mut self, slot: Slot) -> Option<&mut Option<Item>> {

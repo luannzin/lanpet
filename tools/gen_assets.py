@@ -922,13 +922,12 @@ def cobble(x, y):
     return c
 
 
-def planks(t, across=True):
-    """Floorboards; `across` runs them left-right."""
+def planks(t):
+    """Floorboards, running left-right."""
     def f(x, y):
-        a, b = (y, x) if across else (x, y)
-        row = a // 6
-        c = tone3(t, x, y, vnoise(b, a + row * 40, 24, 9) * 0.7)
-        if a % 6 == 5 or (b + row * 29) % 46 == 0:
+        row = y // 6
+        c = tone3(t, x, y, vnoise(x, y + row * 40, 24, 9) * 0.7)
+        if y % 6 == 5 or (x + row * 29) % 46 == 0:
             c = mix(c, INK, 0.2)
         return c
     return f
@@ -1590,9 +1589,8 @@ def room(key, w, h, floor, wall, decor=None, glows=(), exit="town"):
     walk = [[1 <= x < w - 1 and 2 <= y < h - 1 for x in range(w)] for y in range(h)]
     if exit:
         walk[h - 1][door] = True
-    pl = dict(key=key, w=w, h=h, ground=img, walk=walk, bg=[42, 32, 28], spawn=[door * TILE + 8, (h - 2) * TILE + 8],
-              doors=[dict(at=[door, h - 1], to=exit, arrive=None)] if exit else [], props=[], slots={})
-    return pl
+    return dict(key=key, w=w, h=h, ground=img, walk=walk, bg=[42, 32, 28], spawn=[door * TILE + 8, (h - 2) * TILE + 8],
+                doors=[dict(at=[door, h - 1], to=exit, arrive=None)] if exit else [], props=[], slots={})
 
 
 def elevator():

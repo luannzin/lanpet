@@ -263,7 +263,7 @@ impl App {
         };
         match self.view_loc() {
             Loc::Town => {
-                for loc in Loc::buildings(self.save.id) {
+                for loc in [Loc::Home(self.save.id), Loc::Library, Loc::Gym, Loc::Shop, Loc::Portal, Loc::Arena] {
                     let sub = match loc {
                         Loc::Home(_) => "Sleep, eat and drink",
                         Loc::Library => "Study · +Mana",
@@ -432,9 +432,7 @@ impl App {
             },
             "browse" => ("See everything for sale".into(), vec![Act::View(View::Expanded), Act::Tab(Tab::Here)]),
             // a building: walking up to its door goes in
-            a => match a.strip_prefix("go:").and_then(|k| Loc::from_key(k, self.save.id)) {
-                Some(Loc::Town) => ("Out to town".into(), vec![]),
-                Some(Loc::Home(_)) => ("Go home".into(), vec![]),
+            a => match a.strip_prefix("go:").and_then(Loc::from_key) {
                 Some(l) => (format!("Enter the {}", l.name()), vec![]),
                 None => (String::new(), vec![]),
             },

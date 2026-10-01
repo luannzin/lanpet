@@ -146,11 +146,6 @@ pub enum Loc {
 }
 
 impl Loc {
-    /// The town's buildings, in the order the town's "go to" list shows them (yours first).
-    pub fn buildings(me: u64) -> [Loc; 6] {
-        [Loc::Home(me), Loc::Library, Loc::Gym, Loc::Shop, Loc::Portal, Loc::Arena]
-    }
-
     /// Key in meta.json.
     pub fn key(self) -> &'static str {
         match self {
@@ -195,9 +190,9 @@ impl Loc {
         matches!(self, Loc::Lobby | Loc::Floor(_) | Loc::Home(_))
     }
 
-    /// A fixed door's destination ("home" is always your own). The block's other doors depend on
-    /// who's online: see `App::through`.
-    pub fn from_key(key: &str, me: u64) -> Option<Loc> {
+    /// A fixed door's destination. The apartment block's other doors depend on who's online: see
+    /// `App::through`.
+    pub fn from_key(key: &str) -> Option<Loc> {
         Some(match key {
             "town" => Loc::Town,
             "library" => Loc::Library,
@@ -205,7 +200,6 @@ impl Loc {
             "portal" => Loc::Portal,
             "arena" => Loc::Arena,
             "shop" => Loc::Shop,
-            "home" => Loc::Home(me),
             "lobby" => Loc::Lobby,
             _ => return None,
         })
@@ -311,7 +305,7 @@ impl Place {
                 }
             }
         }
-        seen.len() - usize::from(!self.open_at(from)) == open
+        seen.len() == open // `from` is the doormat, which nothing may cover
     }
 
     pub fn door_at(&self, p: Pos2) -> Option<&Door> {
@@ -329,6 +323,11 @@ impl Place {
 
     pub fn spawn(&self) -> Pos2 {
         Pos2::from(self.spawn)
+    }
+
+    /// The `i`th of its `name` spots, or the spawn point when it has none.
+    pub fn spot(&self, name: &str, i: usize) -> Pos2 {
+        self.slots(name).get(i).map_or(self.spawn(), |s| Pos2::from(*s))
     }
 
     /// Keeps a point (say, from the network) inside the place.
@@ -607,6 +606,6 @@ mod tests {
             let s = serde_json::to_string(&l).unwrap();
             assert_eq!(serde_json::from_str::<Loc>(&s).unwrap(), l);
         }
-        assert_eq!(Loc::from_key("home", 7), Some(Loc::Home(7)));
+        assert_eq!(Loc::from_key("lobby"), Some(Loc::Lobby));
     }
 }
