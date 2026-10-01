@@ -22,6 +22,8 @@ pub struct FurniArt {
     pub solid: bool,
     /// Where a pet stands to use it, from its feet.
     pub stand: [f32; 2],
+    #[serde(default)]
+    pub light: Option<[f32; 6]>,
 }
 
 /// Every place, with the homes furnished from their owners' layouts.
@@ -88,6 +90,7 @@ impl World {
                 hot: Some([feet.x - size.x / 2.0, feet.y - size.y, size.x, size.y]),
                 act: p.f.act().map(String::from),
                 stand: Some([stand.x, stand.y]),
+                light: a.light,
             });
         }
         home.slots.insert("sleep".into(), beds);
@@ -234,6 +237,9 @@ pub struct Prop {
     pub act: Option<String>,
     /// Where the pet goes to use it.
     pub stand: Option<[f32; 2]>,
+    /// The light it gives off after dark: [dx, dy] from its feet, radius, and an RGB colour.
+    #[serde(default)]
+    pub light: Option<[f32; 6]>,
 }
 
 impl Prop {
@@ -578,7 +584,7 @@ mod tests {
         let mut shell = place(&["#######", "#.....#", "#.....#", "#.....#", "#######"]);
         shell.key = "home".into();
         shell.spawn = [3.5 * TILE, 3.5 * TILE]; // the doormat, tile (3, 3)
-        let art = |size, solid| FurniArt { sprite: 0, size, low: false, solid, stand: [0.0, 8.0] };
+        let art = |size, solid| FurniArt { sprite: 0, size, low: false, solid, stand: [0.0, 8.0], light: None };
         let mut furni: HashMap<Furni, FurniArt> = Furni::ALL.iter().map(|&f| (f, art([1, 1], true))).collect();
         furni.insert(Furni::Rug, art([2, 2], false));
         furni.insert(Furni::Sofa, art([3, 1], true));

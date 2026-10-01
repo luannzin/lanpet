@@ -170,6 +170,67 @@ pub fn text1(p: &Painter, anchor: Pos2, align: Align2, text: &str, font: FontId,
     r
 }
 
+/// The light at `hour` (local time): a colour washed over the scene, and how dark it is (0 by day,
+/// 1 deep in the night) for the lamps to answer. Rooms get less of the wash: their lights are on.
+pub fn daylight(hour: f32, indoors: bool) -> (Color32, f32) {
+    // hour: wash colour and its opacity, and how dark it is
+    const NIGHT: [f32; 5] = [14.0, 18.0, 58.0, 165.0, 1.0];
+    const KEYS: [(f32, [f32; 5]); 9] = [
+        (0.0, NIGHT),
+        (5.0, NIGHT),
+        (6.3, [250.0, 140.0, 130.0, 60.0, 0.3]), // dawn
+        (7.6, [255.0, 255.0, 255.0, 0.0, 0.0]),  // day
+        (17.0, [255.0, 255.0, 255.0, 0.0, 0.0]),
+        (18.4, [255.0, 150.0, 50.0, 55.0, 0.15]), // golden hour
+        (19.6, [96.0, 52.0, 128.0, 115.0, 0.7]),  // dusk
+        (21.0, NIGHT),
+        (24.0, NIGHT),
+    ];
+    let h = hour.rem_euclid(24.0);
+    let i = KEYS.iter().rposition(|k| k.0 <= h).unwrap_or(0).min(KEYS.len() - 2);
+    let ((h0, a), (h1, b)) = (KEYS[i], KEYS[i + 1]);
+    let k = ((h - h0) / (h1 - h0)).clamp(0.0, 1.0);
+    let [r, g, b, alpha, dark]: [f32; 5] = std::array::from_fn(|j| a[j] + (b[j] - a[j]) * k);
+    let alpha = if indoors { alpha * 0.65 } else { alpha };
+    (Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, alpha as u8), dark)
+}
+
+/// A soft pool of `color` light around `c`, `strength` 0..1: brightest in the middle, gone at `r`.
+pub fn light(p: &Painter, c: Pos2, r: f32, color: Color32, strength: f32) {
+    // a wide soft pool, and a brighter heart where the light is
+    for (reach, alpha) in [(1.0, 110.0), (0.4, 90.0)] {
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(c, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (strength * alpha) as u8));
+        const N: u32 = 28;
+        for i in 0..N {
+            let a = i as f32 / N as f32 * std::f32::consts::TAU;
+            mesh.colored_vertex(c + vec2(a.cos(), a.sin()) * r * reach, Color32::TRANSPARENT);
+            mesh.add_triangle(0, 1 + i, 1 + (i + 1) % N);
+        }
+        p.add(mesh);
+    }
+}
+
+/// Sun by day, half a sun at dawn and dusk, the moon at night: 12×12 pixels centred on `c`.
+pub fn sky_icon(p: &Painter, c: Pos2, hour: f32) {
+    let px = |x: f32, y: f32, w: f32, h: f32, col: Color32| p.rect_filled(Rect::from_min_size(c + vec2(x, y), vec2(w, h)), 0.0, col);
+    let h = hour.rem_euclid(24.0);
+    if (7.0..18.0).contains(&h) {
+        px(-4.0, -4.0, 8.0, 8.0, GOLD);
+        for (x, y, w, hh) in [(-1.0, -7.0, 2.0, 2.0), (-1.0, 5.0, 2.0, 2.0), (-7.0, -1.0, 2.0, 2.0), (5.0, -1.0, 2.0, 2.0)] {
+            px(x, y, w, hh, GOLD);
+        }
+    } else if (5.5..7.0).contains(&h) || (18.0..20.0).contains(&h) {
+        px(-5.0, -1.0, 10.0, 5.0, Color32::from_rgb(0xff, 0x96, 0x3a));
+        px(-7.0, 4.0, 14.0, 2.0, PARCH);
+    } else {
+        // a crescent, row by row (2 px pixels): where each row starts and how wide it is
+        for (row, (x, w)) in [(1.0, 3.0), (0.0, 2.0), (-1.0, 2.0), (-1.0, 2.0), (-1.0, 2.0), (0.0, 2.0), (1.0, 3.0)].into_iter().enumerate() {
+            px(x * 2.0 - 2.0, row as f32 * 2.0 - 7.0, w * 2.0, 2.0, PARCH_LT);
+        }
+    }
+}
+
 /// A game cursor around `r`: four pixel corner brackets with a dark drop.
 pub fn brackets(p: &Painter, r: Rect, color: Color32) {
     let len = (r.width().min(r.height()) / 4.0).clamp(5.0, 12.0);
@@ -235,4 +296,20 @@ pub fn bubble(p: &Painter, head: Pos2, text: &str, bounds: Rect, pop: f32) -> Re
     }
     p.galley(r.min + vec2(7.0, 4.0), g, INK);
     r.expand(2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daylight;
+
+    #[test]
+    fn days_are_clear_and_nights_dark() {
+        assert_eq!(daylight(12.0, false).0.a(), 0);
+        let (night, dark) = daylight(23.0, false);
+        assert!(night.a() > 150 && dark == 1.0);
+        assert!(daylight(23.0, true).0.a() < night.a(), "indoors the lights are on");
+        assert_eq!(daylight(0.0, false), daylight(24.0, false));
+        let dusk = daylight(19.0, false).1;
+        assert!(dusk > 0.0 && dusk < 1.0);
+    }
 }

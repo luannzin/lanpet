@@ -11,6 +11,40 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The local time of day in hours (14.5 is half past two), from the OS clock and time zone.
+/// `LANPET_HOUR` overrides it, to see the town at night by day.
+pub fn local_hours() -> f32 {
+    if let Some(h) = std::env::var("LANPET_HOUR").ok().and_then(|h| h.parse::<f32>().ok()) {
+        return h.rem_euclid(24.0);
+    }
+    #[cfg(windows)]
+    {
+        // SYSTEMTIME: year, month, day of week, day, hour, minute, second, milliseconds
+        #[repr(C)]
+        struct Time([u16; 8]);
+        unsafe extern "system" {
+            fn GetLocalTime(t: *mut Time);
+        }
+        let mut t = Time([0; 8]);
+        unsafe { GetLocalTime(&mut t) };
+        t.0[4] as f32 + t.0[5] as f32 / 60.0 + t.0[6] as f32 / 3600.0
+    }
+    #[cfg(unix)]
+    {
+        // struct tm starts tm_sec, tm_min, tm_hour (ints); 64 aligned bytes hold all of it
+        #[repr(C, align(8))]
+        struct Tm([i32; 16]);
+        unsafe extern "C" {
+            fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+        }
+        let (secs, mut tm) = (now() as i64, Tm([0; 16]));
+        if unsafe { localtime_r(&secs, &mut tm) }.is_null() {
+            return (now() % DAY) as f32 / 3600.0; // no time zone to be had: UTC
+        }
+        tm.0[2] as f32 + tm.0[1] as f32 / 60.0 + tm.0[0] as f32 / 3600.0
+    }
+}
+
 /// splitmix64: tiny and deterministic, so both LAN peers replay the exact same battle.
 #[derive(Clone)]
 pub struct Rng(pub u64);
@@ -1430,6 +1464,12 @@ mod tests {
         let gold = p.gold + q.gold;
         q.inherit(p);
         assert_eq!((q.gold, q.bag.get(&Item::IronSword)), (gold, Some(&1)));
+    }
+
+    #[test]
+    fn the_os_says_what_time_it_is() {
+        let h = local_hours();
+        assert!((0.0..24.0).contains(&h), "{h}");
     }
 
     #[test]

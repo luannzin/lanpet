@@ -52,6 +52,8 @@ LAN play: be on the same Wi-Fi/network and click **Allow** on the first-run netw
   floor to set it down, or take more out of storage. The Shop sells furniture; visitors see your
   home as you left it.
 - Click a coworker's pet to battle, wave or send a gift. Chat reaches the pets in the same place.
+- The town keeps your clock: golden at sunset, dark at night with the lamps, windows and glowing
+  furniture lit.
 - The expanded view can be made bigger by dragging its bottom-right corner.
 
 The save lives in `~/.local/share/lanpet/` (Linux), `~/Library/Application Support/lanpet/` (macOS)

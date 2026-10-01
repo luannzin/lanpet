@@ -837,6 +837,12 @@ def shades(h):
     return (mix(b, WHITE, 0.3), b, mix(b, INK, 0.3))
 
 
+def lamp(dx, dy, r, color):
+    """The light a prop gives off after dark: where from (from its feet), how far, what colour."""
+    c = rgb(color)
+    return [dx, dy, r, c[0], c[1], c[2]]
+
+
 def dq(t, x, y, steps):
     """Ordered-dither quantize t in 0..1 to `steps` levels."""
     return max(0, min(steps, math.floor(t * steps + (BAYER[y % 4][x % 4] + 0.5) / 16))) / steps
@@ -1364,10 +1370,12 @@ def ring():
 
 
 def bleachers():
-    c = Canvas(50, 28)
-    c.rect(1, 2, 49, 13, WOOD)
-    c.rect(1, 12, 49, 26, shades("#c8935e"))
-    c.rect(1, 12, 49, 13, DARKWOOD[1], edge=False)
+    """Two steps of benches, the back one higher."""
+    c = Canvas(50, 30)
+    for y in (2, 14):
+        c.rect(1, y, 49, y + 5, WOOD)  # the seat
+        c.rect(1, y + 5, 49, y + 13, shades("#8a5c3e"))  # its riser
+        c.dots([(x, y + 2) for x in range(6, 46, 10)], DARKWOOD[2])
     return c.image()
 
 
@@ -1410,6 +1418,9 @@ def display():
 
 
 BUILDINGS = {"apartment": apartment, "library": library_b, "gym": gym_b, "shop": shop_b, "arena": arena_b, "shrine": shrine}
+# the glow from each building's door and windows after dark
+BUILDING_LIGHT = {"apartment": lamp(0, -16, 42, WARM), "library": lamp(0, -20, 36, WARM), "gym": lamp(0, -18, 38, "#e6f0ff"),
+                  "shop": lamp(0, -22, 40, WARM), "arena": lamp(0, -16, 36, "#ffb070"), "shrine": lamp(0, -38, 50, "#8b7bff")}
 SPRITES, SPRITE_IDS = [], {}
 
 
@@ -1421,10 +1432,10 @@ def sprite_id(name, fn, args=()):
     return SPRITE_IDS[name]
 
 
-def put(pl, name, fn, tx, ty, fw=1, fh=1, act=None, stand=None, low=False, block=True, args=()):
+def put(pl, name, fn, tx, ty, fw=1, fh=1, act=None, stand=None, low=False, block=True, args=(), light=None):
     """Stand prop `name` (drawn by `fn`) on tiles tx..tx+fw, ty..ty+fh. `low` ones (beds, mats) go
     under every pet; the rest sort with the pets by their feet. Clicking a prop with an `act`
-    walks the pet to `stand` (by default just in front of it) and then does it."""
+    walks the pet to `stand` (by default just in front of it) and then does it. `light` is a `lamp`."""
     i = sprite_id(name, fn, args)
     img = SPRITES[i]
     feet = [(tx + fw / 2) * TILE, (ty + fh) * TILE]
@@ -1436,7 +1447,7 @@ def put(pl, name, fn, tx, ty, fw=1, fh=1, act=None, stand=None, low=False, block
     if act:
         hot = [feet[0] - img.width / 2, feet[1] - img.height, img.width, img.height]
         stand = stand or [feet[0], feet[1] + TILE / 2]
-    pl["props"].append(dict(sprite=i, feet=feet, low=low, hot=hot, act=act, stand=stand))
+    pl["props"].append(dict(sprite=i, feet=feet, low=low, hot=hot, act=act, stand=stand, light=light))
     return feet
 
 
@@ -1523,12 +1534,13 @@ def build_town():
               doors=[], props=[], slots={})
     for key, kind, bx, by, bw, bh in buildings:
         door = [bx + bw // 2, by + bh]
-        feet = put(pl, kind, BUILDINGS[kind], bx, by, bw, bh, act="go:" + key, stand=[door[0] * TILE + 8, door[1] * TILE + 8])
+        feet = put(pl, kind, BUILDINGS[kind], bx, by, bw, bh, act="go:" + key, stand=[door[0] * TILE + 8, door[1] * TILE + 8],
+                   light=BUILDING_LIGHT[kind])
         shadow(img, feet[0], feet[1], bw * 8 + 4, 3)
         pl["doors"].append(dict(at=door, to=key, arrive=None))
     put(pl, "fountain", fountain, 29, 19, 3, 2)
     for x, y in ((27, 18), (33, 18), (27, 22), (33, 22)):
-        put(pl, "lamp", lamp_post, x, y)
+        put(pl, "lamp", lamp_post, x, y, light=lamp(0, -32, 48, "#ffd98a"))
     for ty in range(h):
         for tx in range(w):
             if not walk[ty][tx] or dist[ty][tx] < 2 or (tx, ty) in pier:
@@ -1614,8 +1626,9 @@ def build_lobby():
             c.rect(x + 3, y + 3, x + 9, y + 4, DARKWOOD[2], edge=False)
         rug(c, 4 * TILE, 5 * TILE, 10 * TILE, 8 * TILE - 4, "#5a8ae0", "#9ec4ff")
     pl = room("lobby", 14, 9, checker("#fbf6ec", "#ece2d0"), wallpaper("#f2e6d6", "#e8d8c2"), decor, glows=[(112, 30, 50, WARM, 0.2)])
-    put(pl, "elevator", elevator, 6, 2, 2, 1, act="elevator")
+    put(pl, "elevator", elevator, 6, 2, 2, 1, act="elevator", light=lamp(0, -38, 20, "#ffcc33"))
     put(pl, "counter", counter, 1, 4, 4, 1)
+    put(pl, "floor lamp", floor_lamp, 9, 2, light=FURNITURE["Lamp"][8])
     put(pl, "sofa", sofa, 10, 5, 3, 1)
     put(pl, "plant", plant, 5, 2)
     put(pl, "plant", plant, 12, 7)
@@ -1630,14 +1643,16 @@ def build_floor():
     """One floor of the apartment block, the same for every floor: a corridor with four front doors
     (whose they are depends on who's online) and the elevator."""
     def decor(c, W, H):
+        c.rect(3 * TILE, 2 * TILE + 6, W - 5, 5 * TILE - 3, shades("#b83a4a"))
         for x in FLOOR_DOORS:
-            x0 = x * TILE + 1
-            c.rect(x0, 6, x0 + 14, 32, DARKWOOD)
-            c.rect(x0 + 2, 8, x0 + 12, 32, WOOD, edge=False)
-            c.ellipse(x0 + 10, 22, 1.2, 1.2, shades("#ffcc33"), edge=False)
-        c.rect(3 * TILE, 2 * TILE + 3, W - 5, 5 * TILE - 3, shades("#b83a4a"))
+            x0 = x * TILE - 2  # a frame a little wider than the tile, a door, its knob and number plate
+            c.rect(x0, 3, x0 + 20, 32, DARKWOOD)
+            c.rect(x0 + 3, 6, x0 + 17, 32, shades("#c8935e"), edge=False)
+            c.rect(x0 + 5, 9, x0 + 15, 13, shades("#fff4dc"), edge=False)
+            c.ellipse(x0 + 14, 21, 1.4, 1.4, shades("#ffcc33"), edge=False)
+            rug(c, x * TILE, 2 * TILE + 1, (x + 1) * TILE, 3 * TILE - 2, "#a86a4a", "#d89a6a")
     pl = room("floor", 20, 6, dirt(T("#f0b0a0", "#d8907e", "#b87262")), wallpaper("#ede4f6", "#e0d4ee"), decor, exit=None)
-    put(pl, "elevator", elevator, 1, 2, 2, 1, act="elevator")
+    put(pl, "elevator", elevator, 1, 2, 2, 1, act="elevator", light=lamp(0, -38, 20, "#ffcc33"))
     for i, x in enumerate(FLOOR_DOORS):
         pl["doors"].append(dict(at=[x, 2], to=f"apt{i}", arrive=None))
     pl["slots"] = {"lift": [[2 * TILE, 3 * TILE + 8]], "apt": [[x * TILE + 8, 3 * TILE + 8] for x in FLOOR_DOORS]}
@@ -1718,32 +1733,32 @@ def rug_prop():
 
 
 # Furniture for homes (Furni in game.rs): sprite, its arguments, footprint in tiles, low (under the
-# pets), solid (blocks walking), and where a pet stands to use it, from its feet.
+# pets), solid (blocks walking), where a pet stands to use it (from its feet), and its `lamp`.
 FURNITURE = {
-    "Bed": ("bed", bed, (), 2, 3, True, True, [0, -14]),
-    "Fridge": ("fridge", fridge, (), 1, 1, False, True, [0, 8]),
-    "Stove": ("stove", stove, (), 2, 1, False, True, [0, 8]),
-    "Cooler": ("cooler", cooler, (), 1, 1, False, True, [0, 8]),
-    "Rug": ("rug", rug_prop, (), 5, 3, True, False, [0, 8]),
-    "Nightstand": ("nightstand", nightstand, (), 1, 1, False, True, [0, 8]),
-    "Sofa": ("sofa", sofa, (), 3, 1, False, True, [0, 8]),
-    "Table": ("table", table, (), 2, 1, False, True, [0, 8]),
-    "Plant": ("plant", plant, (), 1, 1, False, True, [0, 8]),
-    "Cactus": ("cactus", cactus, (), 1, 1, False, True, [0, 8]),
-    "Lamp": ("floor lamp", floor_lamp, (), 1, 1, False, True, [0, 8]),
-    "Armchair": ("armchair", armchair, (), 1, 1, False, True, [0, 8]),
-    "Beanbag": ("beanbag", beanbag, (), 1, 1, False, True, [0, 8]),
-    "Bookshelf": ("shelf0", books_shelf, (3,), 2, 1, False, True, [0, 8]),
-    "Desk": ("desk", desk, (), 2, 1, False, True, [0, 8]),
-    "Tv": ("tv", tv, (), 2, 1, False, True, [0, 8]),
-    "Aquarium": ("aquarium", aquarium, (), 2, 1, False, True, [0, 8]),
-    "Arcade": ("arcade", arcade, (), 1, 1, False, True, [0, 8]),
+    "Bed": ("bed", bed, (), 2, 3, True, True, [0, -14], None),
+    "Fridge": ("fridge", fridge, (), 1, 1, False, True, [0, 8], None),
+    "Stove": ("stove", stove, (), 2, 1, False, True, [0, 8], lamp(0, -12, 20, "#ffb070")),
+    "Cooler": ("cooler", cooler, (), 1, 1, False, True, [0, 8], None),
+    "Rug": ("rug", rug_prop, (), 5, 3, True, False, [0, 8], None),
+    "Nightstand": ("nightstand", nightstand, (), 1, 1, False, True, [0, 8], lamp(0, -24, 32, WARM)),
+    "Sofa": ("sofa", sofa, (), 3, 1, False, True, [0, 8], None),
+    "Table": ("table", table, (), 2, 1, False, True, [0, 8], None),
+    "Plant": ("plant", plant, (), 1, 1, False, True, [0, 8], None),
+    "Cactus": ("cactus", cactus, (), 1, 1, False, True, [0, 8], None),
+    "Lamp": ("floor lamp", floor_lamp, (), 1, 1, False, True, [0, 8], lamp(0, -30, 46, WARM)),
+    "Armchair": ("armchair", armchair, (), 1, 1, False, True, [0, 8], None),
+    "Beanbag": ("beanbag", beanbag, (), 1, 1, False, True, [0, 8], None),
+    "Bookshelf": ("shelf0", books_shelf, (3,), 2, 1, False, True, [0, 8], None),
+    "Desk": ("desk", desk, (), 2, 1, False, True, [0, 8], lamp(11, -26, 22, "#ffe8a8")),
+    "Tv": ("tv", tv, (), 2, 1, False, True, [0, 8], lamp(0, -14, 32, "#8fd8ff")),
+    "Aquarium": ("aquarium", aquarium, (), 2, 1, False, True, [0, 8], lamp(0, -12, 30, "#5ae0f0")),
+    "Arcade": ("arcade", arcade, (), 1, 1, False, True, [0, 8], lamp(0, -26, 28, "#3fd07a")),
 }
 
 
 def furniture():
-    return {k: dict(sprite=sprite_id(name, fn, args), size=[w, h], low=low, solid=solid, stand=stand)
-            for k, (name, fn, args, w, h, low, solid, stand) in FURNITURE.items()}
+    return {k: dict(sprite=sprite_id(name, fn, args), size=[w, h], low=low, solid=solid, stand=stand, light=light)
+            for k, (name, fn, args, w, h, low, solid, stand, light) in FURNITURE.items()}
 
 
 def build_library():
@@ -1755,11 +1770,11 @@ def build_library():
     for i, x in enumerate((1, 3, 11, 13)):
         put(pl, f"shelf{i % 2}", books_shelf, x, 2, 2, 1, act="study", args=(3 + i % 2,))
     for x in (5, 10):
-        put(pl, "floor lamp", floor_lamp, x, 2)
+        put(pl, "floor lamp", floor_lamp, x, 2, light=FURNITURE["Lamp"][8])
     study = []
     for x, y in ((3, 5), (11, 5), (3, 7), (11, 7)):
         spot = [(x + 1) * TILE, y * TILE - 4]  # behind the desk, which hides the pet's legs
-        put(pl, "desk", desk, x, y, 2, 1, act="study", stand=spot)
+        put(pl, "desk", desk, x, y, 2, 1, act="study", stand=spot, light=FURNITURE["Desk"][8])
         study.append(spot)
     put(pl, "plant", plant, 1, 8)
     put(pl, "plant", plant, 14, 8)
@@ -1794,11 +1809,11 @@ def build_portal():
         c.ring(W / 2, 6.2 * TILE, 52, 18, 2, shades("#b8a0ff"), edge=False)
     pl = room("portal", 14, 10, flagstones(T("#a89ec8", "#8c82b2", "#6e6496")), wallpaper("#5a4a88", "#4e3f7a"), decor,
               glows=[(112, 40, 64, "#7a5aff", 0.3), (112, 50, 30, "#5ae0f0", 0.15)])
-    put(pl, "portal", portal_arch, 5, 2, 5, 2, act="explore", stand=[7 * TILE + 8, 5 * TILE + 8])
+    put(pl, "portal", portal_arch, 5, 2, 5, 2, act="explore", stand=[7 * TILE + 8, 5 * TILE + 8], light=lamp(0, -28, 76, "#7a5aff"))
     for x in (3, 10):
-        put(pl, "candle", candle, x, 2)
+        put(pl, "candle", candle, x, 2, light=lamp(0, -16, 28, "#ffcc66"))
     for x in (1, 12):
-        put(pl, "crystal", crystal, x, 7)
+        put(pl, "crystal", crystal, x, 7, light=lamp(0, -8, 24, "#b07aff"))
     return pl
 
 

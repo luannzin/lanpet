@@ -28,6 +28,7 @@ Zero-setup LAN presence: no accounts, no server. Anyone on the same network runn
 - The apartment block houses everyone online, four homes a floor (ordered by pet id, so every client agrees), reached by elevator from its lobby. Your home has your bed, fridge and water; you can walk into a coworker's home to visit, and they see you there.
 - Homes are furnished from their owner's layout (18 pieces, bought at the Shop with gold, kept in storage when not out). Decorate mode picks pieces up and sets them down on the floor grid; a piece can't block the doormat or wall off any floor. Visitors fetch the layout from its owner and refetch when it changes. This is the base for the economy and rewards to come.
 - Timed jobs: Study/Lift/Run 10 min, Sleep 20 min, expeditions 5–60 min by zone.
+- Day and night follow the local clock: dawn, clear day, golden hour, dusk and night washes over the scene (lighter indoors), with lamps, building doors and glowing furniture casting light after dark.
 
 ## Capabilities and Constraints
 

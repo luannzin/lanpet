@@ -82,6 +82,7 @@ impl App {
         order.extend(bodies.iter().enumerate().map(|(i, b)| (b.feet.y, None, i)));
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut hits = Vec::new();
+        let mut tags = Vec::new();
         self.heads.clear();
         self.me_head = None;
         for (_, prop, i) in order {
@@ -101,11 +102,7 @@ impl App {
                 &PetDraw { species: b.species, stage: b.stage, hat: b.hat, anim: b.anim, frame: b.frame, feet, scale: ps, squash: b.squash, flip: b.flip, flash: b.flash },
             );
             if let Some(name) = &b.name {
-                let sel = self.selected == Some(b.id);
-                let g = painter.layout_no_wrap(name.clone(), FontId::new(11.0, heavy()), if sel { INK } else { PARCH });
-                let r = Rect::from_center_size(feet + vec2(0.0, 4.0 * s), g.size() + vec2(10.0, 2.0));
-                painter.rect_filled(r, 0.0, if sel { GOLD } else { WOOD_LO });
-                painter.galley(r.min + vec2(5.0, 1.0), g, INK);
+                tags.push((feet + vec2(0.0, 4.0 * s), name.clone(), self.selected == Some(b.id)));
             }
             if b.me {
                 self.me_head = Some(head);
@@ -118,6 +115,25 @@ impl App {
             }
             self.heads.push((b.id, head, feet, b.anim));
             hits.push((b.id, b.me, Rect::from_min_max(pos2(feet.x - 13.0 * ps, feet.y - 27.0 * ps), pos2(feet.x + 13.0 * ps, feet.y))));
+        }
+
+        // the time of day: a wash over the place (half as much indoors, where the lights are on),
+        // then pools of light around lamps, doors and glowing things as it gets dark
+        let (wash, dark) = daylight(game::local_hours(), loc != Loc::Town);
+        painter.rect_filled(rect, 0.0, wash);
+        if dark > 0.05 {
+            for q in &place.props {
+                if let Some([dx, dy, r, cr, cg, cb]) = q.light {
+                    light(&painter, to(Pos2::from(q.feet) + vec2(dx, dy)), r * s, Color32::from_rgb(cr as u8, cg as u8, cb as u8), dark);
+                }
+            }
+        }
+        // name tags read the same at any hour
+        for (at, name, sel) in tags {
+            let g = painter.layout_no_wrap(name, FontId::new(11.0, heavy()), if sel { INK } else { PARCH });
+            let r = Rect::from_center_size(at, g.size() + vec2(10.0, 2.0));
+            painter.rect_filled(r, 0.0, if sel { GOLD } else { WOOD_LO });
+            painter.galley(r.min + vec2(5.0, 1.0), g, INK);
         }
 
         // under the pointer: a pet, else something that does something (the front-most prop), else a
@@ -392,6 +408,14 @@ impl App {
         let life = text1(p, pos2(bar.max.x + 12.0, r.center().y), Align2::LEFT_CENTER, &life, FontId::new(12.0, heavy()), PARCH, r.max.x - 110.0 - bar.max.x);
         ui.interact(bar.expand(4.0), ui.id().with("xp"), Sense::hover()).on_hover_text(format!("{:.0} / {need:.0} XP to Lv {}", pet.xp, pet.level + 1));
         ui.interact(life.expand(4.0), ui.id().with("life"), Sense::hover()).on_hover_text(format!("{}. Well-kept pets grow up stronger.", life_line(pet)));
+        // the town keeps your clock: sun, dusk or moon
+        let hour = game::local_hours();
+        let sky = pos2(life.max.x + 14.0, r.center().y);
+        if sky.x + 8.0 < r.max.x - 110.0 {
+            sky_icon(p, sky, hour);
+            let tip = format!("{:02}:{:02} in town", hour as u32, (hour.fract() * 60.0) as u32);
+            ui.interact(Rect::from_center_size(sky, vec2(18.0, 18.0)), ui.id().with("sky"), Sense::hover()).on_hover_text(tip);
+        }
 
         // right to left: hide to tray (when there is one), out on the desktop, expand/shrink
         let mut x = r.max.x + 4.0;
