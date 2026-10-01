@@ -58,6 +58,17 @@ impl App {
         for q in place.props.iter().filter(|q| q.low) {
             self.art.prop(&painter, q.sprite, to(Pos2::from(q.feet)), s, Color32::WHITE);
         }
+        // a floor's front doors say whose they are
+        if let Loc::Floor(n) = loc {
+            for d in &place.doors {
+                let Some(owner) = d.to.strip_prefix("apt").and_then(|i| self.resident(n, i.parse().ok()?)) else { continue };
+                let name = if owner == self.save.id { "You".to_string() } else { self.pet_name(owner).unwrap_or_default() };
+                let g = painter.layout_no_wrap(name, FontId::new(10.0, heavy()), PARCH);
+                let r = Rect::from_center_size(to(pos2(d.centre().x, 13.0)), g.size() + vec2(8.0, 2.0));
+                painter.rect_filled(r, 0.0, WOOD_LO);
+                painter.galley(r.min + vec2(4.0, 1.0), g, PARCH);
+            }
+        }
 
         // props and pets in front-to-back order
         let mut order: Vec<(f32, Option<usize>, usize)> = place.props.iter().enumerate().filter(|(_, q)| !q.low).map(|(i, q)| (q.feet[1], Some(i), 0)).collect();
@@ -119,7 +130,7 @@ impl App {
                     }
                     None => place.door_at(wp).map(|d| {
                         let tile = Rect::from_center_size(d.centre(), Vec2::splat(TILE));
-                        (Rect::from_min_max(to(tile.min), to(tile.max)), self.hot_act(&format!("go:{}", d.to)).0, d.centre(), Vec::new())
+                        (Rect::from_min_max(to(tile.min), to(tile.max)), self.door_label(d), d.centre(), Vec::new())
                     }),
                 }
             }
@@ -305,7 +316,7 @@ impl App {
         let p = ui.painter();
         let dy = -7.0 * self.kick * self.kick;
         let w = r.width() - 16.0;
-        text1(p, pos2(r.center().x, r.min.y + 12.0 + dy), Align2::CENTER_CENTER, self.view_loc().name(), FontId::new(18.0, heavy()), INK, w);
+        text1(p, pos2(r.center().x, r.min.y + 12.0 + dy), Align2::CENTER_CENTER, &self.place_name(self.view_loc()), FontId::new(18.0, heavy()), INK, w);
         text1(p, pos2(r.center().x, r.min.y + 25.5 + dy * 0.4), Align2::CENTER_CENTER, &self.status_line(), FontId::proportional(12.0), INK_SOFT, w);
     }
 
@@ -433,7 +444,7 @@ impl App {
     fn side(&mut self, ui: &mut Ui, r: Rect, t: f64, acts: &mut Vec<Act>) {
         plate(ui.painter(), r, PARCH, PARCH_LO);
         let inner = r.shrink(3.0);
-        let tabs = [(Tab::Here, self.view_loc().name()), (Tab::Bag, "Bag"), (Tab::Chat, "Chat")];
+        let tabs = [(Tab::Here, self.place_name(self.view_loc())), (Tab::Bag, "Bag".into()), (Tab::Chat, "Chat".into())];
         let tw = (inner.width() - 2.0 * 4.0 - 8.0) / 3.0;
         for (k, (tab, label)) in tabs.into_iter().enumerate() {
             let tr = Rect::from_min_size(inner.min + vec2(4.0 + k as f32 * (tw + 4.0), 4.0), vec2(tw, 28.0));
@@ -442,7 +453,7 @@ impl App {
             let p = ui.painter();
             p.rect_filled(tr, 0.0, WOOD_LO);
             p.rect_filled(tr.shrink(2.0), 0.0, if on { PARCH_LT } else if resp.hovered() { WOOD } else { WOOD_HI });
-            text1(p, tr.center(), Align2::CENTER_CENTER, label, FontId::new(13.0, heavy()), if on { INK } else { PARCH }, tw - 8.0);
+            text1(p, tr.center(), Align2::CENTER_CENTER, &label, FontId::new(13.0, heavy()), if on { INK } else { PARCH }, tw - 8.0);
             if resp.has_focus() {
                 p.rect_stroke(tr.expand(1.0), 0.0, Stroke::new(2.0, GOLD), StrokeKind::Outside);
             }

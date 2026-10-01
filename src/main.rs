@@ -242,8 +242,10 @@ enum Act {
     Sell(Item),
     Buy(Item),
     Unequip(Slot),
-    /// Walk to a place, through whatever doors are on the way.
+    /// Walk to a place, through whatever doors (and elevator rides) are on the way.
     Go(Loc),
+    /// Take the elevator to the lobby or a floor (from beside it).
+    Ride(Loc),
     /// Walk to a point in this place, then do these.
     Walk(Pos2, Vec<Act>),
     Select(Option<u64>),
@@ -542,6 +544,61 @@ impl App {
 
     fn peers_in(&self, loc: Loc) -> impl Iterator<Item = &Peer> + '_ {
         self.peers.values().filter(move |p| p.card.loc == Some(loc))
+    }
+
+    /// Everyone with a home in the apartment block right now (us and the pets online), in id order:
+    /// four homes a floor, laid out the same on every LAN client.
+    fn residents(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.peers.keys().copied().chain([self.save.id]).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The floor and door (0..4) of someone's home, while they're online.
+    fn apartment(&self, owner: u64) -> Option<(u8, usize)> {
+        world::apartment(&self.residents(), owner)
+    }
+
+    /// Whose home is behind door `door` of floor `floor`.
+    fn resident(&self, floor: u8, door: usize) -> Option<u64> {
+        world::resident(&self.residents(), floor, door)
+    }
+
+    /// A pet's name: ours, or one online.
+    fn pet_name(&self, id: u64) -> Option<String> {
+        if id == self.save.id {
+            return self.save.pet.as_ref().map(|p| p.name.clone());
+        }
+        self.peers.get(&id).map(|p| p.card.name.clone())
+    }
+
+    /// "Home", "Mochi's home", "Floor 2".
+    fn place_name(&self, loc: Loc) -> String {
+        match loc {
+            Loc::Home(o) if o != self.save.id => format!("{}'s home", self.pet_name(o).unwrap_or("Someone".into())),
+            l => l.name(),
+        }
+    }
+
+    /// Where a door leads, and where you come out. Most are fixed; in the apartment block they
+    /// depend on who's online: a floor's doors open into its residents' homes, and a home's front
+    /// door onto its floor (or the lobby, once its owner has gone offline).
+    fn through(&self, d: &world::Door) -> Option<(Loc, Pos2)> {
+        let lift = |l: Loc| self.art.place(l).slots("lift").first().map_or(self.art.place(l).spawn(), |s| Pos2::from(*s));
+        match (d.to.as_str(), self.loc) {
+            ("floor", Loc::Home(owner)) => Some(match self.apartment(owner) {
+                Some((floor, door)) => {
+                    let place = self.art.place(Loc::Floor(floor));
+                    (Loc::Floor(floor), place.slots("apt").get(door).map_or(place.spawn(), |s| Pos2::from(*s)))
+                }
+                None => (Loc::Lobby, lift(Loc::Lobby)),
+            }),
+            (key, Loc::Floor(floor)) if key.starts_with("apt") => {
+                let owner = self.resident(floor, key[3..].parse().ok()?)?;
+                Some((Loc::Home(owner), Pos2::from(d.arrive)))
+            }
+            (key, _) => Loc::from_key(key, self.save.id).map(|l| (l, Pos2::from(d.arrive))),
+        }
     }
 
     /// Where the pets working here stand: each job's spots (desks, treadmills...) shared out the
@@ -876,17 +933,21 @@ impl App {
                         p.path = self.art.place(loc).path(p.pos, at).unwrap_or_default(); // drifted: walk it back
                     }
                 }
-                if card.loc == Some(view) && (new || p.card.loc != card.loc) {
+                let arrived = (new || p.card.loc != card.loc).then_some(card.loc).flatten();
+                if arrived == Some(view) {
                     self.fresh.push(card.id);
                 }
+                let name = card.name.clone();
                 (p.card, p.addr, p.seen) = (card, from, t);
+                self.visited(arrived, &name, t);
             }
             Msg::Move { id, loc, from, to } => {
                 let view = self.view_loc();
                 let place = self.art.place(loc);
                 let Some(p) = self.peers.get_mut(&id) else { return }; // wait for its Hello
                 let (from, to) = (place.clamp(Pos2::from(from)), place.clamp(Pos2::from(to)));
-                if p.card.loc != Some(loc) {
+                let arrived = (p.card.loc != Some(loc)).then_some(loc);
+                if arrived.is_some() {
                     (p.card.loc, p.pos) = (Some(loc), from);
                     if loc == view {
                         self.fresh.push(id);
@@ -895,6 +956,8 @@ impl App {
                     p.pos = from;
                 }
                 p.path = place.path(p.pos, to).unwrap_or_default();
+                let name = p.card.name.clone();
+                self.visited(arrived, &name, t);
             }
             Msg::Challenge { battle, card } => {
                 let away = self.pet_loc().is_none();
@@ -955,6 +1018,20 @@ impl App {
                 self.log(ChatLine { room: Some(loc), name: Some(name), text: text.clone(), mine: false, at: t });
                 self.say(id, text, t, 6.0);
             }
+        }
+    }
+
+    /// A pet just turned up at `arrived`: if that's our home, it's come to visit.
+    fn visited(&mut self, arrived: Option<Loc>, name: &str, t: f64) {
+        if arrived != Some(Loc::Home(self.save.id)) {
+            return;
+        }
+        self.news(format!("{name} is visiting your home"), t);
+        if self.pet_loc() == arrived {
+            self.say_me(format!("Welcome, {name}!"), t);
+            self.react(Anim::Happy, 1.2, t);
+        } else {
+            self.attention |= !self.open();
         }
     }
 
@@ -1365,15 +1442,23 @@ impl App {
         }
     }
 
-    /// The autopilot's next leg: out to town, then in at `goal`'s door.
+    /// The autopilot's next leg towards `goal` (see `world::next_leg`): a walk to a door, or to the
+    /// elevator and a ride.
     fn head_for(&mut self, goal: Loc, t: f64) {
         if self.loc == goal {
             self.m.goal = None;
             return;
         }
-        let key = if self.loc == Loc::Town { goal.key() } else { "town" };
-        let door = self.art.place(self.loc).door_to(key).map(|d| d.centre());
-        if !door.is_some_and(|d| self.walk(d)) {
+        let residents = self.residents();
+        let place = self.art.place(self.loc);
+        let (to, then) = match world::next_leg(self.loc, goal, |o| world::apartment(&residents, o)) {
+            Some(world::Leg::Door(key)) => (place.door_to(&key).map(|d| d.centre()), Vec::new()),
+            Some(world::Leg::Ride(floor)) => (place.props.iter().find(|p| p.act.as_deref() == Some("elevator")).and_then(|p| p.stand).map(Pos2::from), vec![Act::Ride(floor)]),
+            None => (None, Vec::new()),
+        };
+        if to.is_some_and(|to| self.walk(to)) {
+            self.m.then = then;
+        } else {
             self.m.goal = None;
             self.say_me("I can't find the way...", t);
         }
@@ -1381,10 +1466,11 @@ impl App {
 
     /// The end of a walk: through the door it stopped on, or on with what the walk was for.
     fn arrived(&mut self, t: f64) {
-        let door = self.art.place(self.loc).door_at(self.m.pos).map(|d| (Loc::from_key(&d.to, self.save.id), Pos2::from(d.arrive)));
+        let door = self.art.place(self.loc).door_at(self.m.pos).map(|d| self.through(d));
         match door {
-            Some((Some(to), at)) => self.enter(to, at, t),
-            _ => self.due.append(&mut self.m.then),
+            Some(Some((to, at))) => self.enter(to, at, t),
+            Some(None) => self.say_me("Nobody lives here yet.", t),
+            None => self.due.append(&mut self.m.then),
         }
     }
 
@@ -1397,6 +1483,12 @@ impl App {
             self.m.goal = None;
         }
         self.m.wander_at = t + 3.0;
+        if let Loc::Home(o) = loc
+            && o != self.save.id
+        {
+            let name = self.pet_name(o).unwrap_or("them".into());
+            self.say_me(format!("Knock knock, {name}!"), t);
+        }
         self.selected = None;
         self.fx.clear();
         self.floaters.clear();
@@ -1470,8 +1562,13 @@ impl App {
             }
             Act::Tab(tab) => self.tab = tab,
             Act::Quit => self.quit(ctx),
-            Act::Go(_) | Act::Walk(..) if self.fight.is_some() || self.pet_loc().is_none() => {}
-            Act::Go(_) | Act::Walk(..) if self.job().is_some() => self.say_me("I'm busy! Press Stop first.", t),
+            Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.fight.is_some() || self.pet_loc().is_none() => {}
+            Act::Go(_) | Act::Walk(..) | Act::Ride(_) if self.job().is_some() => self.say_me("I'm busy! Press Stop first.", t),
+            Act::Ride(to) => {
+                let place = self.art.place(to);
+                let at = place.slots("lift").first().map_or(place.spawn(), |s| Pos2::from(*s));
+                self.enter(to, at, t);
+            }
             Act::Go(loc) => {
                 (self.m.goal, self.m.path, self.m.then) = (Some(loc), Vec::new(), Vec::new());
                 self.m.last_click = t;

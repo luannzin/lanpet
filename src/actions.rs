@@ -2,7 +2,7 @@
 //! and the one-line status under the place's name.
 
 use crate::game::{DAY, Item, Job, Need, Pet, Slot, Stage, ZONES, now};
-use crate::world::Loc;
+use crate::world::{Door, Loc};
 use crate::{Act, App, Tab, View};
 
 /// One thing you can do: a button in the popover, a row in the expanded list.
@@ -146,7 +146,12 @@ impl App {
             };
         }
         if let Some(goal) = self.m.goal {
-            return format!("{} is on the way to {}", pet.name, if matches!(goal, Loc::Home(_)) { "home".to_string() } else { format!("the {}", goal.name()) });
+            let to = match goal {
+                Loc::Home(o) if o == self.save.id => "home".to_string(),
+                l if l.in_block() => self.place_name(l),
+                l => format!("the {}", l.name()),
+            };
+            return format!("{} is on the way to {to}", pet.name);
         }
         let names: Vec<&str> = self.peers_in(self.view_loc()).map(|p| p.card.name.as_str()).collect();
         match names.as_slice() {
@@ -257,6 +262,27 @@ impl App {
                     v.push(Btn::new(loc.name(), sub, "Go", vec![Act::Go(loc)]));
                 }
             }
+            Loc::Home(o) if o != self.save.id => {
+                v.push(Btn::new("Go home", "Back to your own place", "Go", vec![Act::Go(Loc::Home(self.save.id))]));
+                v.push(Btn::new("Water", "+40 Water · free", "Drink", vec![Act::Drink]));
+                v.push(Btn::new("Pet", format!("{} loves it · +Mood", pet.name), "Pet", vec![Act::PetIt]));
+            }
+            Loc::Lobby | Loc::Floor(_) => {
+                let (here, me) = (self.view_loc(), self.save.id);
+                if let Some((floor, _)) = self.apartment(me) {
+                    v.push(Btn::new("Go home", format!("Floor {floor} · your place"), "Go", vec![Act::Go(Loc::Home(me))]));
+                }
+                let floors = self.residents().len().div_ceil(4) as u8;
+                for n in (1..=floors).filter(|&n| here != Loc::Floor(n)) {
+                    let names: Vec<String> = (0..4).filter_map(|i| self.resident(n, i)).map(|o| if o == me { "you".into() } else { self.pet_name(o).unwrap_or_default() }).collect();
+                    v.push(Btn::new(format!("Floor {n}"), names.join(", "), "Ride", vec![Act::Go(Loc::Floor(n))]));
+                }
+                if here == Loc::Lobby {
+                    v.push(Btn::new("Town", "Back outside", "Go", vec![Act::Go(Loc::Town)]));
+                } else {
+                    v.push(Btn::new("Lobby", "Ground floor · the way out", "Ride", vec![Act::Go(Loc::Lobby)]));
+                }
+            }
             Loc::Home(_) => {
                 if let Some((ver, _)) = &self.update.ready {
                     let sub = if self.update.installing { "Installing…".to_string() } else { format!("{ver} is ready · LanPet restarts") };
@@ -348,11 +374,27 @@ impl App {
         finish(v, full)
     }
 
-    /// Furniture (see `HOT` in gen_assets.py): its hover label and what clicking it does.
+    /// What going through a door does, for its hover label.
+    pub(crate) fn door_label(&self, d: &Door) -> String {
+        match self.through(d) {
+            Some((Loc::Town, _)) => "Out to town".into(),
+            Some((Loc::Home(o), _)) if o == self.save.id => "Go home".into(),
+            Some((Loc::Home(o), _)) => format!("Visit {}", self.pet_name(o).unwrap_or_default()),
+            Some((Loc::Floor(n), _)) => format!("Out to floor {n}"),
+            Some((Loc::Lobby, _)) if self.loc != Loc::Town => "Out to the lobby".into(),
+            Some((l, _)) => format!("Enter the {}", l.name()),
+            None => "Nobody lives here yet".into(),
+        }
+    }
+
+    /// Props with an `act` (see `put` in gen_assets.py): the hover label and what clicking does.
     pub(crate) fn hot_act(&self, act: &str) -> (String, Vec<Act>) {
         let pet = self.save.pet.as_ref();
+        let visiting = matches!(self.view_loc(), Loc::Home(o) if o != self.save.id);
         match act {
+            "sleep" if visiting => ("Not your bed".into(), vec![]),
             "sleep" => ("Sleep · 20 min".into(), vec![Act::Start(Job::Sleep)]),
+            "elevator" => ("Elevator · pick a floor".into(), vec![Act::View(View::Expanded), Act::Tab(Tab::Here)]),
             "study" => ("Study · 10 min".into(), vec![Act::Start(Job::Study)]),
             "lift" => ("Lift weights · 10 min".into(), vec![Act::Start(Job::Lift)]),
             "run" => ("Run · 10 min".into(), vec![Act::Start(Job::Run)]),

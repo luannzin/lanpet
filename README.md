@@ -44,7 +44,10 @@ LAN play: be on the same Wi-Fi/network and click **Allow** on the first-run netw
   and the doormat to walk back out. Your coworkers' pets walk around it too.
 - Places are where things happen: Home (sleep, food, water), Library (study), Gym (weights,
   treadmill), Portal (expeditions), Arena (battles), Shop. Click furniture to use it, or use the
-  buttons. In town, the buttons walk your pet to any building.
+  buttons. In town, the buttons walk your pet to any building. Hold the mouse down to steer, or
+  click the minimap to head somewhere further off.
+- Homes are in the apartment block: everyone online gets a front door, four to a floor. Take the
+  elevator to a floor and walk in at a coworker's door to visit their home.
 - Click a coworker's pet to battle, wave or send a gift. Chat reaches the pets in the same place.
 - The expanded view can be made bigger by dragging its bottom-right corner.
 

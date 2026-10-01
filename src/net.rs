@@ -11,8 +11,8 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 pub const PORT: u16 = 47474;
-/// LP2: the walkable world (pets have a place and a position). LP1 pets are ignored.
-const MAGIC: &[u8] = b"LP2";
+/// LP3: the apartment block (the lobby and floors are places). Older pets are ignored.
+const MAGIC: &[u8] = b"LP3";
 
 /// A place position from the network: finite and roughly on the map (the app clamps it to the place).
 fn sane(p: [f32; 2]) -> [f32; 2] {
@@ -178,8 +178,8 @@ mod tests {
     #[test]
     fn rejects_junk_and_clamps_hostile_cards() {
         assert!(decode(b"hello").is_none());
-        assert!(decode(b"LP2{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
-        assert!(decode(b"LP2{\"t\":\"Chat\",\"id\":1,\"name\":\"x\",\"loc\":\"Moon\",\"text\":\"hi\"}").is_none());
+        assert!(decode(b"LP3{\"t\":\"Gift\",\"from\":\"x\",\"item\":\"NotAnItem\"}").is_none());
+        assert!(decode(b"LP3{\"t\":\"Chat\",\"id\":1,\"name\":\"x\",\"loc\":\"Moon\",\"text\":\"hi\"}").is_none());
         let mut c = card(1);
         c.fighter.str = i32::MAX;
         c.name = "a\u{7}very long name that goes on".into();

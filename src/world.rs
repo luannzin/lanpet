@@ -19,6 +19,9 @@ pub enum Loc {
     Shop,
     /// Someone's home, by the owner's pet id.
     Home(u64),
+    /// The apartment block's ground floor, and its floors above (from 1), four homes each.
+    Lobby,
+    Floor(u8),
 }
 
 impl Loc {
@@ -37,31 +40,42 @@ impl Loc {
             Loc::Arena => "arena",
             Loc::Shop => "shop",
             Loc::Home(_) => "home",
+            Loc::Lobby => "lobby",
+            Loc::Floor(_) => "floor",
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> String {
         match self {
-            Loc::Town => "Town",
-            Loc::Library => "Library",
-            Loc::Gym => "Gym",
-            Loc::Portal => "Portal",
-            Loc::Arena => "Arena",
-            Loc::Shop => "Shop",
-            Loc::Home(_) => "Home",
+            Loc::Town => "Town".into(),
+            Loc::Library => "Library".into(),
+            Loc::Gym => "Gym".into(),
+            Loc::Portal => "Portal".into(),
+            Loc::Arena => "Arena".into(),
+            Loc::Shop => "Shop".into(),
+            Loc::Home(_) => "Home".into(),
+            Loc::Lobby => "Apartments".into(),
+            Loc::Floor(n) => format!("Floor {n}"),
         }
     }
 
-    /// "in town", "at home", "in the Gym".
+    /// "in town", "at home", "in the Gym", "on floor 2".
     pub fn at(self) -> String {
         match self {
             Loc::Town => "in town".into(),
             Loc::Home(_) => "at home".into(),
+            Loc::Floor(n) => format!("on floor {n}"),
             l => format!("in the {}", l.name()),
         }
     }
 
-    /// A door's destination; "home" is always your own (the Apartment's door).
+    /// The apartment block: the lobby, its floors and the homes on them.
+    pub fn in_block(self) -> bool {
+        matches!(self, Loc::Lobby | Loc::Floor(_) | Loc::Home(_))
+    }
+
+    /// A fixed door's destination ("home" is always your own). The block's other doors depend on
+    /// who's online: see `App::through`.
     pub fn from_key(key: &str, me: u64) -> Option<Loc> {
         Some(match key {
             "town" => Loc::Town,
@@ -71,6 +85,7 @@ impl Loc {
             "arena" => Loc::Arena,
             "shop" => Loc::Shop,
             "home" => Loc::Home(me),
+            "lobby" => Loc::Lobby,
             _ => return None,
         })
     }
@@ -254,6 +269,53 @@ impl Place {
     }
 }
 
+/// Floor (from 1) and door (0..4) of `id`'s home among the block's `residents` (sorted ids, four
+/// homes a floor).
+pub fn apartment(residents: &[u64], id: u64) -> Option<(u8, usize)> {
+    let i = residents.iter().position(|&r| r == id)?;
+    Some(((i / 4 + 1) as u8, i % 4))
+}
+
+/// Whose home is behind `door` (0..4) of `floor`.
+pub fn resident(residents: &[u64], floor: u8, door: usize) -> Option<u64> {
+    if door >= 4 {
+        return None;
+    }
+    residents.get((floor as usize).checked_sub(1)? * 4 + door).copied()
+}
+
+/// One leg of a walk between places.
+#[derive(Debug, PartialEq)]
+pub enum Leg {
+    /// Through the door whose `to` is this.
+    Door(String),
+    /// Up or down in the apartment block's elevator.
+    Ride(Loc),
+}
+
+/// The next leg from `at` towards `goal` (somewhere else): out of a building to town and into the
+/// next one; in the apartment block, by elevator to the right floor and in at the right front
+/// door. `home` says where someone's home is while they're online. None when there's no way.
+pub fn next_leg(at: Loc, goal: Loc, home: impl Fn(u64) -> Option<(u8, usize)>) -> Option<Leg> {
+    let floor_of = |l: Loc| match l {
+        Loc::Floor(n) => Some(n),
+        Loc::Home(o) => home(o).map(|h| h.0),
+        _ => None,
+    };
+    Some(match at {
+        Loc::Town => Leg::Door(if goal.in_block() { "lobby" } else { goal.key() }.into()),
+        Loc::Lobby if !goal.in_block() => Leg::Door("town".into()),
+        Loc::Lobby => Leg::Ride(Loc::Floor(floor_of(goal)?)),
+        Loc::Floor(n) => match (goal, floor_of(goal)) {
+            (Loc::Home(o), Some(f)) if f == n => Leg::Door(format!("apt{}", home(o)?.1)),
+            (_, Some(f)) => Leg::Ride(Loc::Floor(f)),
+            _ => Leg::Ride(Loc::Lobby),
+        },
+        Loc::Home(_) => Leg::Door("floor".into()),
+        _ => Leg::Door("town".into()),
+    })
+}
+
 /// Walks `pos` along `path` at `speed` px/s, dropping waypoints as they're reached. Returns how far
 /// it moved sideways (to face that way), or None when there was nowhere to go.
 pub fn step(pos: &mut Pos2, path: &mut Vec<Pos2>, speed: f32, dt: f32) -> Option<f32> {
@@ -339,8 +401,38 @@ mod tests {
     }
 
     #[test]
+    fn the_block_houses_everyone_online_four_a_floor() {
+        let ids = [3, 8, 20, 21, 40, 77];
+        assert_eq!(apartment(&ids, 3), Some((1, 0)));
+        assert_eq!(apartment(&ids, 40), Some((2, 0)));
+        assert_eq!(apartment(&ids, 77), Some((2, 1)));
+        assert_eq!(apartment(&ids, 5), None);
+        assert_eq!((resident(&ids, 2, 1), resident(&ids, 2, 2), resident(&ids, 0, 0), resident(&ids, 1, 4)), (Some(77), None, None, None));
+    }
+
+    #[test]
+    fn the_way_home_goes_by_lobby_elevator_and_front_door() {
+        let ids = [3, 8, 20, 21, 40, 77];
+        let home = |o| apartment(&ids, o);
+        let door = |k: &str| Some(Leg::Door(k.into()));
+        // from the gym to 77's home on floor 2: out, into the block, up, in at door 1
+        assert_eq!(next_leg(Loc::Gym, Loc::Home(77), home), door("town"));
+        assert_eq!(next_leg(Loc::Town, Loc::Home(77), home), door("lobby"));
+        assert_eq!(next_leg(Loc::Lobby, Loc::Home(77), home), Some(Leg::Ride(Loc::Floor(2))));
+        assert_eq!(next_leg(Loc::Floor(1), Loc::Home(77), home), Some(Leg::Ride(Loc::Floor(2))));
+        assert_eq!(next_leg(Loc::Floor(2), Loc::Home(77), home), door("apt1"));
+        // and back out to the shop
+        assert_eq!(next_leg(Loc::Home(77), Loc::Shop, home), door("floor"));
+        assert_eq!(next_leg(Loc::Floor(2), Loc::Shop, home), Some(Leg::Ride(Loc::Lobby)));
+        assert_eq!(next_leg(Loc::Lobby, Loc::Shop, home), door("town"));
+        assert_eq!(next_leg(Loc::Town, Loc::Shop, home), door("shop"));
+        // nobody's home to go to once they've gone offline
+        assert_eq!(next_leg(Loc::Lobby, Loc::Home(5), home), None);
+    }
+
+    #[test]
     fn locations_survive_the_network() {
-        for l in [Loc::Town, Loc::Gym, Loc::Home(u64::MAX - 3)] {
+        for l in [Loc::Town, Loc::Gym, Loc::Home(u64::MAX - 3), Loc::Lobby, Loc::Floor(3)] {
             let s = serde_json::to_string(&l).unwrap();
             assert_eq!(serde_json::from_str::<Loc>(&s).unwrap(), l);
         }

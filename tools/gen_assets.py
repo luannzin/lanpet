@@ -1474,7 +1474,7 @@ def build_town():
     cx, cy, rx, ry = 30, 20, 28.5, 18
     plaza = (26, 17, 9, 7)
     # (place, sprite, footprint x, y, w, h in tiles); the door is the tile under the middle of the footprint
-    buildings = [("home", "apartment", 10, 8, 5, 4), ("library", "library", 27, 6, 7, 4), ("portal", "shrine", 44, 7, 5, 4),
+    buildings = [("lobby", "apartment", 10, 8, 5, 4),("library", "library", 27, 6, 7, 4), ("portal", "shrine", 44, 7, 5, 4),
                  ("gym", "gym", 44, 17, 7, 4), ("shop", "shop", 38, 27, 5, 4), ("arena", "arena", 13, 25, 7, 5)]
     roads = [[(12, 12), (12, 20), (26, 20)], [(30, 10), (30, 17)], [(46, 11), (46, 14), (35, 14), (35, 17)],
              [(47, 21), (47, 22), (35, 22)], [(40, 31), (40, 33), (30, 33), (30, 24)], [(16, 30), (16, 33), (30, 33)]]
@@ -1551,9 +1551,9 @@ def build_town():
     return pl
 
 
-def room(key, w, h, floor, wall, decor=None, glows=()):
+def room(key, w, h, floor, wall, decor=None, glows=(), exit="town"):
     """A building's inside: `floor` under a two-tile wall painted by `wall` along the top, trim on the
-    other sides, and the way out in the middle of the bottom edge."""
+    other sides, and the way out (to `exit`, if any) in the middle of the bottom edge."""
     W, H = w * TILE, h * TILE
     img = Image.new("RGBA", (W, H))
     px = img.load()
@@ -1570,21 +1570,74 @@ def room(key, w, h, floor, wall, decor=None, glows=()):
     c = Canvas(W, H)
     if decor:
         decor(c, W, H)
-    rug(c, door * TILE + 1, H - 12, (door + 1) * TILE - 1, H - 1, "#a86a4a", "#d89a6a")
+    if exit:
+        rug(c, door * TILE + 1, H - 12, (door + 1) * TILE - 1, H - 1, "#a86a4a", "#d89a6a")
     img.alpha_composite(c.image())
     for g in glows:
         glow(img, *g)
     lip = mix(TRIM, WHITE, 0.25)
     for y in range(H):
         for x in range(W):
-            gap = door * TILE <= x < (door + 1) * TILE
+            gap = exit and door * TILE <= x < (door + 1) * TILE
             if y < 4 or x < 5 or x >= W - 5 or (y >= H - 5 and not gap):
                 inner = (y == 3 and 4 <= x < W - 4) or (x in (4, W - 5) and y >= 3) or (y == H - 5 and 4 <= x < W - 4)
                 px[x, y] = lip if inner else TRIM
     walk = [[1 <= x < w - 1 and 2 <= y < h - 1 for x in range(w)] for y in range(h)]
-    walk[h - 1][door] = True
+    if exit:
+        walk[h - 1][door] = True
     pl = dict(key=key, w=w, h=h, ground=img, walk=walk, bg=[42, 32, 28], spawn=[door * TILE + 8, (h - 2) * TILE + 8],
-              doors=[dict(at=[door, h - 1], to="town", arrive=None)], props=[], slots={})
+              doors=[dict(at=[door, h - 1], to=exit, arrive=None)] if exit else [], props=[], slots={})
+    return pl
+
+
+def elevator():
+    c = Canvas(34, 42)
+    c.rect(1, 6, 33, 40, METAL)
+    steel = T("#f2f5fa", "#ccd3de", "#9aa4b4")
+    c.rect(4, 10, 16.5, 40, steel)
+    c.rect(17.5, 10, 30, 40, steel)
+    c.rect(11, 1, 23, 7, shades("#3f4454"))  # the floor indicator
+    c.rect(13, 3, 21, 5, rgb("#ffcc33"), edge=False)
+    return c.image()
+
+
+def build_lobby():
+    """The apartment block's ground floor: the elevator up to everyone's homes."""
+    def decor(c, W, H):
+        wall_window(c, 24, 5, 40, 20)
+        for i in range(8):  # mailboxes
+            x, y = 152 + (i % 4) * 14, 6 + (i // 4) * 11
+            c.rect(x, y, x + 12, y + 9, shades("#c8935e"))
+            c.rect(x + 3, y + 3, x + 9, y + 4, DARKWOOD[2], edge=False)
+        rug(c, 4 * TILE, 5 * TILE, 10 * TILE, 8 * TILE - 4, "#5a8ae0", "#9ec4ff")
+    pl = room("lobby", 14, 9, checker("#fbf6ec", "#ece2d0"), wallpaper("#f2e6d6", "#e8d8c2"), decor, glows=[(112, 30, 50, WARM, 0.2)])
+    put(pl, "elevator", elevator, 6, 2, 2, 1, act="elevator")
+    put(pl, "counter", counter, 1, 4, 4, 1)
+    put(pl, "sofa", sofa, 10, 5, 3, 1)
+    put(pl, "plant", plant, 5, 2)
+    put(pl, "plant", plant, 12, 7)
+    pl["slots"] = {"lift": [[7 * TILE, 3 * TILE + 8]]}
+    return pl
+
+
+FLOOR_DOORS = (5, 9, 13, 17)  # tile columns of a floor's four apartment doors
+
+
+def build_floor():
+    """One floor of the apartment block, the same for every floor: a corridor with four front doors
+    (whose they are depends on who's online) and the elevator."""
+    def decor(c, W, H):
+        for x in FLOOR_DOORS:
+            x0 = x * TILE + 1
+            c.rect(x0, 6, x0 + 14, 32, DARKWOOD)
+            c.rect(x0 + 2, 8, x0 + 12, 32, WOOD, edge=False)
+            c.ellipse(x0 + 10, 22, 1.2, 1.2, shades("#ffcc33"), edge=False)
+        c.rect(3 * TILE, 2 * TILE + 3, W - 5, 5 * TILE - 3, shades("#b83a4a"))
+    pl = room("floor", 20, 6, dirt(T("#f0b0a0", "#d8907e", "#b87262")), wallpaper("#ede4f6", "#e0d4ee"), decor, exit=None)
+    put(pl, "elevator", elevator, 1, 2, 2, 1, act="elevator")
+    for i, x in enumerate(FLOOR_DOORS):
+        pl["doors"].append(dict(at=[x, 2], to=f"apt{i}", arrive=None))
+    pl["slots"] = {"lift": [[2 * TILE, 3 * TILE + 8]], "apt": [[x * TILE + 8, 3 * TILE + 8] for x in FLOOR_DOORS]}
     return pl
 
 
@@ -1594,7 +1647,7 @@ def build_home():
         picture(c, 150, 8, 18, 14, "#8ab4ff")
         rug(c, 5 * TILE + 2, 5 * TILE + 4, 10 * TILE - 2, 8 * TILE - 4, "#5a8ae0", "#9ec4ff")
     pl = room("home", 14, 10, planks(T("#f2c690", "#deac74", "#c08e58")), wallpaper("#ffe6c8", "#ffd6b0"), decor,
-              glows=[(56, 36, 30, WARM, 0.25)])
+              glows=[(56, 36, 30, WARM, 0.25)], exit="floor")
     put(pl, "bed", bed, 1, 2, 2, 3, act="sleep", low=True, stand=[32, 66])
     put(pl, "nightstand", nightstand, 3, 2)
     put(pl, "sofa", sofa, 5, 2, 3, 1)
@@ -1694,13 +1747,19 @@ def build_shop():
 def build_world():
     """The town first, then the inside of every building, with the doors between them joined up."""
     town = build_town()
-    rooms = [build_home(), build_library(), build_gym(), build_portal(), build_arena(), build_shop()]
+    rooms = [build_home(), build_lobby(), build_floor(), build_library(), build_gym(), build_portal(), build_arena(), build_shop()]
     inside = {p["key"]: p for p in rooms}
     for d in town["doors"]:
         d["arrive"] = inside[d["to"]]["spawn"]
     for p in rooms:
-        x, y = next(d["at"] for d in town["doors"] if d["to"] == p["key"])
-        p["doors"][0]["arrive"] = [x * TILE + 8, (y + 1) * TILE + 8]
+        for d in p["doors"]:
+            if d["to"] == "town":
+                x, y = next(e["at"] for e in town["doors"] if e["to"] == p["key"])
+                d["arrive"] = [x * TILE + 8, (y + 1) * TILE + 8]
+            elif d["to"].startswith("apt"):
+                d["arrive"] = inside["home"]["spawn"]
+            else:
+                d["arrive"] = [0, 0]  # the game works it out from who lives where
     return [town] + rooms
 
 

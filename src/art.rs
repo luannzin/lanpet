@@ -105,7 +105,7 @@ impl Art {
         let meta: Meta = serde_json::from_str(include_str!("../assets/meta.json")).expect("assets/meta.json matches art.rs");
         assert!(meta.states.iter().map(|s| s.name.as_str()).eq(ANIM_NAMES), "regenerate assets: animation rows changed");
         assert!(meta.stages == Stage::ALL, "regenerate assets: life stages changed");
-        for l in [Loc::Town, Loc::Library, Loc::Gym, Loc::Portal, Loc::Arena, Loc::Shop, Loc::Home(0)] {
+        for l in [Loc::Town, Loc::Library, Loc::Gym, Loc::Portal, Loc::Arena, Loc::Shop, Loc::Home(0), Loc::Lobby, Loc::Floor(1)] {
             assert!(meta.places.iter().any(|p| p.key == l.key()), "regenerate assets: no place {}", l.key());
         }
         let sheets: [&[u8]; 5] = [

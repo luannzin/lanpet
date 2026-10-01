@@ -24,8 +24,9 @@ Zero-setup LAN presence: no accounts, no server. Anyone on the same network runn
 
 - Lives next to work apps; must stay out of the way until looked at.
 - Minimizes to the system tray (replacing the old floating "perch" widget). Clicking the tray icon opens a small popover window; the popover can expand to the full view.
-- The world is a walkable top-down island town (16 px tiles, 3/4 view). Its buildings are places you walk into: Home (your own: sleep, food, water), Library, Gym, Portal, Arena, Shop. Each place owns its actions (sleep, feed, study, lift/run, expeditions, LAN battles, buying); clicking furniture walks the pet over and uses it.
-- Planned next: an apartment building with a floor per group of online LAN players and visits to their homes (v0.3), then buying furniture and decorating your home (v0.4).
+- The world is a walkable top-down island town (16 px tiles, 3/4 view) with a minimap. Its buildings are places you walk into: Library, Gym, Portal, Arena, Shop, and the apartment block. Each place owns its actions (sleep, feed, study, lift/run, expeditions, LAN battles, buying); clicking furniture walks the pet over and uses it.
+- The apartment block houses everyone online, four homes a floor (ordered by pet id, so every client agrees), reached by elevator from its lobby. Your home has your bed, fridge and water; you can walk into a coworker's home to visit, and they see you there.
+- Planned next: buying furniture and decorating your home (v0.4).
 - Timed jobs: Study/Lift/Run 10 min, Sleep 20 min, expeditions 5–60 min by zone.
 
 ## Capabilities and Constraints
